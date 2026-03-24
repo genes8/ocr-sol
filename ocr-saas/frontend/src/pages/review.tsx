@@ -1,0 +1,359 @@
+import { useCallback, useState } from "react";
+import { useParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import {
+  AlertCircle,
+  Check,
+  ChevronLeft,
+  FileText,
+  RefreshCw,
+  X,
+} from "lucide-react";
+import { documentsApi } from "../services/api";
+import type { BoundingBox, DocumentResult } from "../services/api";
+import { DocumentViewer } from "../components/document-viewer";
+import { FieldEditor } from "../components/field-editor";
+
+interface FieldData {
+  key: string;
+  label: string;
+  value: unknown;
+  confidence: number;
+  bbox?: BoundingBox;
+}
+
+function formatFieldKey(key: string): string {
+  return key
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/^./, (str) => str.toUpperCase());
+}
+
+function flattenFields(
+  data: Record<string, unknown>,
+  confidences: Record<string, number>,
+  prefix = ""
+): FieldData[] {
+  const fields: FieldData[] = [];
+
+  for (const [key, value] of Object.entries(data)) {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      fields.push(...flattenFields(value as Record<string, unknown>, confidences, fullKey));
+    } else {
+      fields.push({
+        key: fullKey,
+        label: formatFieldKey(key),
+        value,
+        confidence: confidences[fullKey] ?? 0.5,
+      });
+    }
+  }
+
+  return fields;
+}
+
+export function Review() {
+  const { id } = useParams<{ id?: string }>();
+  const [selectedField, setSelectedField] = useState<string | undefined>();
+  const [zoom, setZoom] = useState(1);
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+
+  // Fetch document list for review queue
+  const { data: documentList, refetch: refetchList } = useQuery({
+    queryKey: ["documents", "review"],
+    queryFn: () =>
+      documentsApi.list(0, 50, "review"),
+    enabled: !id,
+  });
+
+  // Fetch specific document
+  const {
+    data: documentResult,
+    isLoading,
+    error,
+    refetch: refetchDoc,
+  } = useQuery({
+    queryKey: ["document-result", id],
+    queryFn: () => documentsApi.getResult(id!),
+    enabled: !!id,
+  });
+
+  // Fetch page image URL for bbox overlay
+  const { data: pageImageData } = useQuery({
+    queryKey: ["document-page-image", id, 1],
+    queryFn: () => documentsApi.getPageImageUrl(id!, 1),
+    enabled: !!id && !!documentResult,
+  });
+
+  const handleFieldSelect = useCallback((fieldKey: string, bbox?: BoundingBox) => {
+    setSelectedField(fieldKey);
+    if (bbox) {
+      // Center on the bounding box
+      const centerX = (bbox.x1 + bbox.x2) / 2;
+      const centerY = (bbox.y1 + bbox.y2) / 2;
+      // This would need container dimensions to work properly
+      setPanOffset({ x: -centerX + 400, y: -centerY + 300 });
+    }
+  }, []);
+
+  const handleApprove = async () => {
+    if (!id) return;
+    await documentsApi.update(id, { decision: "auto" });
+    refetchDoc();
+    refetchList();
+  };
+
+  const handleReject = async () => {
+    if (!id) return;
+    await documentsApi.update(id, { decision: "manual" });
+    refetchDoc();
+    refetchList();
+  };
+
+  // Document list view
+  if (!id) {
+    const documents = documentList?.items ?? [];
+
+    return (
+      <div className="p-6">
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold text-gray-900">Review Queue</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Documents that need manual review before processing is complete
+          </p>
+        </div>
+
+        {documents.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 bg-white rounded-lg border border-gray-200">
+            <Check className="w-12 h-12 text-green-500 mb-4" />
+            <h3 className="text-lg font-medium text-gray-900">All caught up!</h3>
+            <p className="mt-1 text-sm text-gray-500">
+              No documents require review at this time.
+            </p>
+          </div>
+        ) : (
+          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Document
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Type
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Confidence
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Date
+                  </th>
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Action
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {documents.map((doc) => (
+                  <tr key={doc.id} className="hover:bg-gray-50">
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center">
+                        <FileText className="h-5 w-5 text-gray-400 mr-3" />
+                        <div>
+                          <div className="text-sm font-medium text-gray-900">
+                            {doc.original_filename}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {(doc.file_size / 1024).toFixed(1)} KB
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
+                        {doc.document_type?.replace("_", " ") || "Unknown"}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className="px-2 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full">
+                        Review Required
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      —
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {new Date(doc.created_at).toLocaleDateString()}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-right">
+                      <a
+                        href={`/review/${doc.id}`}
+                        className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+                      >
+                        Review
+                      </a>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Document review detail view
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <RefreshCw className="w-8 h-8 text-blue-600 animate-spin" />
+      </div>
+    );
+  }
+
+  if (error || !documentResult) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full">
+        <AlertCircle className="w-12 h-12 text-red-500 mb-4" />
+        <h3 className="text-lg font-medium text-gray-900">Error loading document</h3>
+        <p className="mt-1 text-sm text-gray-500">
+          {error instanceof Error ? error.message : "Unknown error occurred"}
+        </p>
+        <a
+          href="/review"
+          className="mt-4 text-blue-600 hover:text-blue-800 text-sm font-medium"
+        >
+          Back to queue
+        </a>
+      </div>
+    );
+  }
+
+  // Transform data to fields
+  const fields: FieldData[] = documentResult.structured_data
+    ? flattenFields(
+        documentResult.structured_data.extracted_data,
+        documentResult.structured_data.field_confidences
+      )
+    : [];
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4 bg-white border-b border-gray-200">
+        <div className="flex items-center gap-4">
+          <a
+            href="/review"
+            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </a>
+          <div>
+            <h1 className="text-xl font-bold text-gray-900">Review Document</h1>
+            <p className="text-sm text-gray-500">
+              {documentResult.document_type?.replace("_", " ")} •{" "}
+              {documentResult.decision?.toUpperCase() || "PENDING"}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleReject}
+            className="flex items-center gap-2 px-4 py-2 text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
+          >
+            <X className="w-4 h-4" />
+            Reject
+          </button>
+          <button
+            onClick={handleApprove}
+            className="flex items-center gap-2 px-4 py-2 text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors"
+          >
+            <Check className="w-4 h-4" />
+            Approve
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Document viewer */}
+        <div className="flex-1 bg-gray-100 p-4">
+          <DocumentViewer
+            imageUrl={pageImageData?.url}
+            textBlocks={documentResult.ocr_result?.text_blocks}
+            selectedField={selectedField}
+            onFieldSelect={handleFieldSelect}
+            zoom={zoom}
+            panOffset={panOffset}
+            onZoomChange={setZoom}
+            onPanChange={setPanOffset}
+          />
+        </div>
+
+        {/* Field editor */}
+        <div className="w-96 bg-gray-50 border-l border-gray-200 overflow-hidden">
+          <FieldEditor
+            fields={fields}
+            onFieldSelect={handleFieldSelect}
+            selectedField={selectedField}
+          />
+        </div>
+      </div>
+
+      {/* Reconciliation info */}
+      {documentResult.reconciliation && (
+        <div className="px-6 py-3 bg-white border-t border-gray-200">
+          <div className="flex items-center gap-4 text-sm">
+            <span
+              className={`px-2 py-1 text-xs font-medium rounded-full ${
+                documentResult.reconciliation.status === "pass"
+                  ? "bg-green-100 text-green-800"
+                  : documentResult.reconciliation.status === "warn"
+                  ? "bg-yellow-100 text-yellow-800"
+                  : "bg-red-100 text-red-800"
+              }`}
+            >
+              Math: {documentResult.reconciliation.status.toUpperCase()}
+            </span>
+            {documentResult.reconciliation.subtotal_match !== undefined && (
+              <span className="text-gray-600">
+                Subtotal:{" "}
+                {documentResult.reconciliation.subtotal_match ? (
+                  <span className="text-green-600">Match</span>
+                ) : (
+                  <span className="text-red-600">Mismatch</span>
+                )}
+              </span>
+            )}
+            {documentResult.reconciliation.vat_match !== undefined && (
+              <span className="text-gray-600">
+                VAT:{" "}
+                {documentResult.reconciliation.vat_match ? (
+                  <span className="text-green-600">Match</span>
+                ) : (
+                  <span className="text-red-600">Mismatch</span>
+                )}
+              </span>
+            )}
+            {documentResult.reconciliation.total_match !== undefined && (
+              <span className="text-gray-600">
+                Total:{" "}
+                {documentResult.reconciliation.total_match ? (
+                  <span className="text-green-600">Match</span>
+                ) : (
+                  <span className="text-red-600">Mismatch</span>
+                )}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

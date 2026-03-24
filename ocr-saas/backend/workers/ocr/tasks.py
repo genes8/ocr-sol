@@ -1,0 +1,398 @@
+"""OCR worker tasks - vLLM GLM-OCR integration."""
+
+import base64
+import io
+import json
+import logging
+import time
+import uuid
+from datetime import datetime
+from typing import Any
+
+import requests
+from PIL import Image
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from api.core.config import settings
+from api.core.database import SyncSessionLocal
+from api.core.storage import get_minio_client
+from api.models.db import Document, DocumentStatus, OCRResult
+from workers.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
+
+
+def get_sync_session() -> Session:
+    """Get sync database session for Celery workers."""
+    return SyncSessionLocal()
+
+
+def update_document_status(
+    document_id: str,
+    status: DocumentStatus,
+    error_message: str | None = None,
+) -> None:
+    """Update document status in database."""
+    session = get_sync_session()
+    try:
+        result = session.execute(
+            select(Document).where(Document.id == uuid.UUID(document_id))
+        )
+        doc = result.scalar_one_or_none()
+        if doc:
+            doc.status = status
+            doc.error_message = error_message
+            session.commit()
+    finally:
+        session.close()
+
+
+def get_processed_pages(document_id: str, tenant_id: str) -> list[tuple[int, Image.Image]]:
+    """Get processed page images from MinIO.
+    
+    Returns:
+        List of (page_number, PIL.Image) tuples
+    """
+    client = get_minio_client()
+    bucket = settings.MINIO_BUCKET_DOCUMENTS
+    
+    # List all processed images for this document
+    prefix = f"{tenant_id}/{document_id}/"
+    
+    pages = []
+    try:
+        objects = client.list_objects(bucket, prefix=prefix, recursive=True)
+        for obj in objects:
+            if "processed" in obj.object_name and obj.object_name.endswith(".jpg"):
+                # Extract page number from filename
+                filename = obj.object_name.split("/")[-1]
+                if filename.startswith("p") and "_processed" in filename:
+                    page_num = int(filename.split("_")[0][1:])
+                    
+                    # Get the image
+                    result = client.get_object(bucket, obj.object_name)
+                    img_data = result.read()
+                    result.close()
+                    result.release_conn()
+                    
+                    img = Image.open(io.BytesIO(img_data))
+                    pages.append((page_num, img))
+    except Exception as e:
+        logger.error(f"Failed to list processed pages: {e}")
+    
+    return sorted(pages, key=lambda x: x[0])
+
+
+def save_ocr_result(
+    document_id: str,
+    full_text: str,
+    text_blocks: list[dict[str, Any]],
+    page_count: int,
+    processing_time_ms: int,
+) -> str:
+    """Save OCR result to database.
+    
+    Returns:
+        OCR result ID
+    """
+    session = get_sync_session()
+    try:
+        ocr_result = OCRResult(
+            id=uuid.uuid4(),
+            document_id=uuid.UUID(document_id),
+            full_text=full_text,
+            text_blocks=text_blocks,
+            page_count=page_count,
+            processing_time_ms=processing_time_ms,
+            model_version=settings.VLLM_MODEL_NAME,
+        )
+        session.add(ocr_result)
+        session.commit()
+        return str(ocr_result.id)
+    finally:
+        session.close()
+
+
+def call_glm_ocr(image: Image.Image) -> dict[str, Any]:
+    """Call GLM-OCR via vLLM API.
+    
+    Args:
+        image: PIL Image to process
+        
+    Returns:
+        OCR result with text and bounding boxes
+    """
+    # Convert image to base64
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    image_b64 = base64.b64encode(buffer.getvalue()).decode()
+    
+    # Prepare request to vLLM
+    url = f"{settings.VLLM_BASE_URL}/v1/chat/completions"
+    
+    payload = {
+        "model": settings.VLLM_MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_b64}"
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": """Extract all text from this document with their bounding box coordinates.
+Return a JSON object with the following structure:
+{
+    "text_blocks": [
+        {
+            "text": "extracted text",
+            "bbox": {"x1": 0, "y1": 0, "x2": 100, "y2": 50},
+            "confidence": 0.95
+        }
+    ],
+    "full_text": "all extracted text combined"
+}"""
+                    }
+                ]
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": 4096,
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+    }
+    
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=settings.VLLM_TIMEOUT,
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        content = result["choices"][0]["message"]["content"]
+        
+        # Parse JSON from response
+        # Handle potential markdown code blocks
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+        
+        return json.loads(content.strip())
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"vLLM API request failed: {e}")
+        raise
+
+
+def fallback_ocr(image: Image.Image) -> dict[str, Any]:
+    """Fallback OCR using Tesseract.
+    
+    This provides actual text extraction when vLLM is not available.
+    """
+    import pytesseract
+    import tempfile
+    import os
+    
+    try:
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Save to temp file for Tesseract (more reliable)
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            image.save(tmp, format='PNG')
+            tmp_path = tmp.name
+        
+        try:
+            # Run Tesseract OCR with English
+            text = pytesseract.image_to_string(tmp_path, lang='eng')
+            data = pytesseract.image_to_data(
+                tmp_path,
+                lang='eng',
+                output_type=pytesseract.Output.DICT,
+            )
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+        
+        # Build text blocks with bounding boxes
+        text_blocks = []
+        n_boxes = len(data["text"])
+        
+        for i in range(n_boxes):
+            t = data["text"][i].strip()
+            if t:  # Only include non-empty text
+                text_blocks.append({
+                    "text": t,
+                    "bbox": {
+                        "x1": int(data["left"][i]),
+                        "y1": int(data["top"][i]),
+                        "x2": int(data["left"][i] + data["width"][i]),
+                        "y2": int(data["top"][i] + data["height"][i]),
+                    },
+                    "confidence": float(data["conf"][i]) / 100 if data["conf"][i] != -1 else 0.5,
+                })
+        
+        # Estimate overall confidence from Tesseract confidence
+        valid_confidences = [b["confidence"] for b in text_blocks if b["confidence"] > 0]
+        avg_confidence = sum(valid_confidences) / len(valid_confidences) if valid_confidences else 0.5
+        
+        logger.info(
+            f"Tesseract OCR extracted {len(text_blocks)} text blocks, "
+            f"avg confidence: {avg_confidence:.2%}"
+        )
+        
+        return {
+            "text_blocks": text_blocks,
+            "full_text": text.strip(),
+        }
+        
+    except Exception as e:
+        logger.error(f"Tesseract OCR failed: {e}")
+        return {
+            "text_blocks": [],
+            "full_text": "",
+            "error": str(e),
+        }
+
+
+def process_single_page(
+    page_num: int,
+    image: Image.Image,
+) -> dict[str, Any]:
+    """Process a single page with OCR.
+    
+    Args:
+        page_num: Page number
+        image: PIL Image
+        
+    Returns:
+        OCR result for this page
+    """
+    try:
+        result = call_glm_ocr(image)
+        return {
+            "page": page_num,
+            "success": True,
+            "text_blocks": result.get("text_blocks", []),
+            "full_text": result.get("full_text", ""),
+        }
+    except Exception as e:
+        logger.warning(f"OCR failed for page {page_num}: {e}")
+        try:
+            result = fallback_ocr(image)
+            return {
+                "page": page_num,
+                "success": False,
+                "text_blocks": result.get("text_blocks", []),
+                "full_text": result.get("full_text", ""),
+                "error": str(e),
+            }
+        except Exception:
+            return {
+                "page": page_num,
+                "success": False,
+                "text_blocks": [],
+                "full_text": "",
+                "error": str(e),
+            }
+
+
+@celery_app.task(bind=True, name="workers.ocr.tasks.process_ocr")
+def process_ocr(self, document_id: str, tenant_id: str, priority: int = 5) -> dict[str, Any]:
+    """Process document pages with OCR.
+    
+    Args:
+        document_id: Document UUID
+        tenant_id: Tenant UUID
+        
+    Returns:
+        OCR processing result
+    """
+    start_time = time.time()
+    logger.info(f"Starting OCR for document {document_id}")
+    
+    try:
+        # Update status
+        update_document_status(document_id, DocumentStatus.OCR)
+        
+        # Get processed pages
+        pages = get_processed_pages(document_id, tenant_id)
+        
+        if not pages:
+            raise ValueError(f"No processed pages found for document {document_id}")
+        
+        # Process each page
+        page_results = []
+        for page_num, image in pages:
+            result = process_single_page(page_num, image)
+            page_results.append(result)
+            logger.info(f"OCR completed for page {page_num}")
+        
+        # Combine results
+        full_text = "\n\n".join(r["full_text"] for r in page_results)
+        
+        # Merge text blocks with page info
+        all_text_blocks = []
+        for result in page_results:
+            for block in result["text_blocks"]:
+                block["page"] = result["page"]
+                all_text_blocks.append(block)
+        
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Save OCR result
+        save_ocr_result(
+            document_id=document_id,
+            full_text=full_text,
+            text_blocks=all_text_blocks,
+            page_count=len(pages),
+            processing_time_ms=processing_time_ms,
+        )
+        
+        # Trigger classification (propagate priority for Feature 5)
+        from workers.classification.tasks import classify_document_task
+        classify_document_task.apply_async(
+            args=[document_id, tenant_id, priority],
+            priority=priority,
+        )
+
+        processing_time = time.time() - start_time
+
+        logger.info(
+            f"OCR completed for document {document_id} "
+            f"in {processing_time:.2f}s"
+        )
+
+        return {
+            "document_id": document_id,
+            "status": "completed",
+            "pages_processed": len(pages),
+            "text_blocks_count": len(all_text_blocks),
+            "processing_time": processing_time,
+            "full_text_length": len(full_text),
+        }
+        
+    except Exception as exc:
+        logger.exception(f"OCR failed for document {document_id}")
+        update_document_status(
+            document_id,
+            DocumentStatus.OCR_FAILED,
+            error_message=str(exc),
+        )
+        
+        raise self.retry(exc=exc, countdown=60, max_retries=3)

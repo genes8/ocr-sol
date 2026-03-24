@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocr-saas-config
+  namespace: ocr-saas
+  labels:
+    app: ocr-saas
+    component: config
+data:
+  # Application Settings
+  APP_ENV: "production"
+  APP_DEBUG: "false"
+  LOG_LEVEL: "INFO"
+  
+  # Database
+  DB_POOL_SIZE: "20"
+  DB_MAX_OVERFLOW: "10"
+  DB_POOL_TIMEOUT: "30"
+  
+  # Redis
+  REDIS_DB: "0"
+  REDIS_MAX_CONNECTIONS: "50"
+  
+  # RabbitMQ
+  RABBITMQ_VHOST: "/"
+  RABBITMQ_PREFETCH_COUNT: "1"
+  
+  # MinIO
+  MINIO_BUCKET_DOCUMENTS: "ocr-documents"
+  MINIO_BUCKET_RESULTS: "ocr-results"
+  MINIO_BUCKET_THUMBNAILS: "ocr-thumbnails"
+  MINIO_SECURE: "false"
+  
+  # vLLM
+  VLLM_MODEL_NAME: "glm-ocr"
+  VLLM_MAX_MODEL_LEN: "4096"
+  VLLM_TENSOR_PARALLEL_SIZE: "1"
+  
+  # Worker Queues
+  QUEUE_PREPROCESS: "preprocess_queue"
+  QUEUE_OCR: "ocr_queue"
+  QUEUE_CLASSIFICATION: "classification_queue"
+  QUEUE_STRUCTURING: "structuring_queue"
+  QUEUE_RECONCILIATION: "reconciliation_queue"
+  QUEUE_VALIDATION: "validation_queue"
+  
+  # Processing Settings
+  PDF_DPI: "200"
+  THUMBNAIL_WIDTH: "300"
+  BLUR_THRESHOLD: "100.0"
+  BRIGHTNESS_THRESHOLD: "30"
+  
+  # Validation Thresholds
+  CONFIDENCE_THRESHOLD_AUTO: "0.85"
+  CONFIDENCE_THRESHOLD_REVIEW: "0.70"
+  CONFIDENCE_THRESHOLD_MANUAL: "0.50"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocr-saas-env
+  namespace: ocr-saas
+  labels:
+    app: ocr-saas
+    component: environment
+data:
+  .env: |
+    # Database
+    DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres.ocr-saas.svc.cluster.local:5432/${POSTGRES_DB}
+    
+    # Redis
+    REDIS_URL=redis://redis.ocr-saas.svc.cluster.local:6379/0
+    
+    # RabbitMQ
+    RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq.ocr-saas.svc.cluster.local:5672/
+    
+    # MinIO
+    MINIO_ENDPOINT=minio.ocr-saas.svc.cluster.local:9000
+    MINIO_ACCESS_KEY=${MINIO_USER}
+    MINIO_SECRET_KEY=${MINIO_PASSWORD}
+    
+    # vLLM
+    VLLM_BASE_URL=http://vllm.ocr-saas.svc.cluster.local:8000

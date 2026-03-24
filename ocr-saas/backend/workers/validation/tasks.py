@@ -1,0 +1,533 @@
+"""Validation worker tasks - Schema validation and decision engine."""
+
+import json
+import logging
+import time
+import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import jsonschema
+from jsonschema import Draft7Validator
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from api.core.config import settings
+from api.models.db import (
+    Decision,
+    Document,
+    DocumentStatus,
+    DocumentType,
+    ReconciliationLog,
+    Supplier,
+    StructuredResult,
+    Tenant,
+)
+from workers.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
+
+# Schema cache
+SCHEMA_CACHE: dict[str, dict[str, Any]] = {}
+
+
+async def get_db_session() -> AsyncSession:
+    """Get database session for workers."""
+    from api.core.database import engine
+    async_session = async_sessionmaker(engine, expire_on_commit=False)
+    return async_session()
+
+
+def update_document(
+    document_id: str,
+    status: DocumentStatus | None = None,
+    decision: Decision | None = None,
+    error_message: str | None = None,
+    processing_completed_at: bool = False,
+) -> None:
+    """Update document in database."""
+    import asyncio
+
+    async def _update():
+        session = await get_db_session()
+        try:
+            result = await session.execute(
+                select(Document).where(Document.id == uuid.UUID(document_id))
+            )
+            doc = result.scalar_one_or_none()
+            if doc:
+                if status:
+                    doc.status = status
+                if decision:
+                    doc.decision = decision
+                if error_message:
+                    doc.error_message = error_message
+                if processing_completed_at:
+                    doc.processing_completed_at = datetime.utcnow()
+                await session.commit()
+        finally:
+            await session.close()
+
+    asyncio.run(_update())
+
+
+def load_schema(document_type: DocumentType) -> dict[str, Any]:
+    """Load JSON schema for document type."""
+    if document_type.value in SCHEMA_CACHE:
+        return SCHEMA_CACHE[document_type.value]
+
+    schema_dir = Path(__file__).parent.parent.parent / "api" / "schemas"
+    schema_path = schema_dir / f"{document_type.value}_schema.json"
+
+    if schema_path.exists():
+        with open(schema_path) as f:
+            schema = json.load(f)
+            SCHEMA_CACHE[document_type.value] = schema
+            return schema
+
+    schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": document_type.value,
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    SCHEMA_CACHE[document_type.value] = schema
+    return schema
+
+
+def validate_schema(
+    data: dict[str, Any],
+    schema: dict[str, Any],
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Validate data against JSON schema."""
+    validator = Draft7Validator(schema)
+    errors = []
+
+    for error in validator.iter_errors(data):
+        path = ".".join(str(p) for p in error.path) if error.path else "root"
+        errors.append({
+            "field": path,
+            "message": error.message,
+            "validator": error.validator,
+            "value": str(error.instance)[:100],
+        })
+
+    return len(errors) == 0, errors
+
+
+def validate_business_rules(
+    data: dict[str, Any],
+    document_type: DocumentType,
+) -> list[dict[str, str]]:
+    """Validate business rules for document type."""
+    violations = []
+
+    if "pib" in data:
+        pib = str(data["pib"])
+        if not (pib.isdigit() and len(pib) in [9, 10]):
+            violations.append({
+                "rule": "pib_format",
+                "message": f"PIB must be 9 or 10 digits, got: {pib}",
+            })
+
+    date_fields = ["date", "invoice_date", "issue_date", "due_date"]
+    import re
+    date_pattern = re.compile(r"^\d{2}[./]\d{2}[./]\d{4}$|^\d{4}-\d{2}-\d{2}$")
+
+    for field in date_fields:
+        if field in data:
+            value = str(data[field])
+            if not date_pattern.match(value):
+                violations.append({
+                    "rule": "date_format",
+                    "message": f"{field} must be in DD.MM.YYYY or ISO format, got: {value}",
+                })
+
+    amount_fields = ["total_amount", "subtotal", "vat_amount"]
+    for field in amount_fields:
+        if field in data:
+            try:
+                amount = float(str(data[field]).replace(",", ""))
+                if amount < 0:
+                    violations.append({
+                        "rule": "negative_amount",
+                        "message": f"{field} cannot be negative: {amount}",
+                    })
+            except ValueError:
+                violations.append({
+                    "rule": "invalid_amount",
+                    "message": f"{field} is not a valid number: {data[field]}",
+                })
+
+    required_fields = {
+        DocumentType.INVOICE: ["invoice_number", "date", "total_amount"],
+        DocumentType.PROFORMA: ["quote_number", "date"],
+        DocumentType.DELIVERY_NOTE: ["delivery_note_number", "date"],
+        DocumentType.CONTRACT: ["contract_number", "date"],
+    }
+
+    if document_type in required_fields:
+        for field in required_fields[document_type]:
+            if field not in data or not data[field]:
+                violations.append({
+                    "rule": "required_field",
+                    "message": f"Required field missing: {field}",
+                })
+
+    return violations
+
+
+def get_tenant_confidence_thresholds(tenant: Tenant | None) -> dict[str, float]:
+    """Get per-tenant confidence thresholds, falling back to global defaults."""
+    defaults = {
+        "invoice_number": settings.DEFAULT_INVOICE_NUMBER_CONFIDENCE,
+        "invoice_date": settings.DEFAULT_INVOICE_DATE_CONFIDENCE,
+        "supplier_name": settings.DEFAULT_SUPPLIER_CONFIDENCE,
+        "supplier_pib": settings.DEFAULT_SUPPLIER_CONFIDENCE,
+        "total_amount": settings.DEFAULT_TOTAL_AMOUNT_CONFIDENCE,
+        "vat_amount": settings.DEFAULT_VAT_AMOUNT_CONFIDENCE,
+    }
+    if tenant and tenant.settings and "confidence_thresholds" in tenant.settings:
+        defaults.update(tenant.settings["confidence_thresholds"])
+    return defaults
+
+
+async def lookup_supplier(
+    tenant_id: uuid.UUID,
+    extracted_data: dict[str, Any],
+    session: AsyncSession,
+) -> dict[str, Any] | None:
+    """Look up a supplier by PIB from extracted data.
+
+    Returns supplier dict if found, None otherwise.
+    """
+    supplier_section = extracted_data.get("supplier", {}) or {}
+    pib = supplier_section.get("pib") or extracted_data.get("supplier_pib")
+
+    if not pib:
+        return None
+
+    result = await session.execute(
+        select(Supplier).where(
+            Supplier.tenant_id == tenant_id,
+            Supplier.pib == str(pib),
+            Supplier.is_active.is_(True),
+        )
+    )
+    supplier = result.scalar_one_or_none()
+
+    if not supplier:
+        return None
+
+    return {
+        "id": str(supplier.id),
+        "name": supplier.name,
+        "pib": supplier.pib,
+        "mb": supplier.mb,
+        "iban": supplier.iban,
+        "address": supplier.address,
+    }
+
+
+async def detect_duplicate(
+    tenant_id: uuid.UUID,
+    extracted_data: dict[str, Any],
+    document_id: uuid.UUID,
+    session: AsyncSession,
+) -> bool:
+    """Detect potential duplicate invoices.
+
+    Checks for same supplier PIB + invoice_number within last 90 days.
+    Secondary: same PIB + total_amount within 1% tolerance.
+    """
+    supplier_section = extracted_data.get("supplier", {}) or {}
+    pib = supplier_section.get("pib") or extracted_data.get("supplier_pib")
+    invoice_number = extracted_data.get("invoice_number")
+
+    if not pib:
+        return False
+
+    cutoff = datetime.utcnow() - timedelta(days=90)
+
+    # Primary: same PIB + invoice_number
+    if invoice_number:
+        result = await session.execute(
+            select(StructuredResult)
+            .join(Document, Document.id == StructuredResult.document_id)
+            .where(
+                Document.tenant_id == tenant_id,
+                Document.id != document_id,
+                Document.created_at >= cutoff,
+                StructuredResult.extracted_data["supplier"]["pib"].as_string() == str(pib),
+                StructuredResult.extracted_data["invoice_number"].as_string() == str(invoice_number),
+            )
+        )
+        if result.scalar_one_or_none():
+            return True
+
+    # Secondary: same PIB + total_amount within 1% tolerance
+    totals = extracted_data.get("totals", {}) or {}
+    total_raw = totals.get("grand_total") or extracted_data.get("grand_total") or extracted_data.get("total_amount")
+    if total_raw is not None:
+        try:
+            total_amount = float(str(total_raw).replace(",", ""))
+            tolerance = total_amount * 0.01
+
+            result = await session.execute(
+                select(StructuredResult)
+                .join(Document, Document.id == StructuredResult.document_id)
+                .where(
+                    Document.tenant_id == tenant_id,
+                    Document.id != document_id,
+                    Document.created_at >= cutoff,
+                    StructuredResult.extracted_data["supplier"]["pib"].as_string() == str(pib),
+                )
+            )
+            candidates = result.scalars().all()
+            for candidate in candidates:
+                c_totals = candidate.extracted_data.get("totals", {}) or {}
+                c_total_raw = (
+                    c_totals.get("grand_total")
+                    or candidate.extracted_data.get("grand_total")
+                    or candidate.extracted_data.get("total_amount")
+                )
+                if c_total_raw is not None:
+                    try:
+                        c_total = float(str(c_total_raw).replace(",", ""))
+                        if abs(c_total - total_amount) <= tolerance:
+                            return True
+                    except (ValueError, TypeError):
+                        pass
+        except (ValueError, TypeError):
+            pass
+
+    return False
+
+
+def determine_decision(
+    structured: StructuredResult,
+    reconciliation: ReconciliationLog | None,
+    schema_valid: bool,
+    business_violations: list,
+    tenant: Tenant | None = None,
+    is_duplicate: bool = False,
+    supplier_match: dict[str, Any] | None = None,
+) -> tuple[Decision, str]:
+    """Determine processing decision based on validation results."""
+    confidences = structured.field_confidences or {}
+    thresholds = get_tenant_confidence_thresholds(tenant)
+
+    # Feature 4: Duplicate detection takes priority
+    if is_duplicate:
+        return Decision.REVIEW, "possible_duplicate"
+
+    # Feature 4: Unknown supplier triggers review
+    supplier_section = structured.extracted_data.get("supplier", {}) or {}
+    supplier_pib = supplier_section.get("pib") or structured.extracted_data.get("supplier_pib")
+    if supplier_pib and supplier_match is None:
+        return Decision.REVIEW, "supplier_not_found"
+
+    # Check for critical fields below absolute manual threshold (0.5)
+    critical_low = [
+        (field, confidences[field])
+        for field in ["total_amount", "invoice_number", "date", "supplier_name"]
+        if field in confidences and confidences[field] < settings.CRITICAL_FIELD_THRESHOLD
+    ]
+    if critical_low:
+        return Decision.MANUAL, f"Critical fields below threshold: {critical_low}"
+
+    if reconciliation and reconciliation.reconciliation_status == "fail":
+        return Decision.MANUAL, "Reconciliation failed: math mismatch"
+
+    fields_below_threshold = [
+        (field, confidences[field], thresholds[field])
+        for field, min_conf in thresholds.items()
+        if field in confidences and confidences[field] < min_conf
+    ]
+    if fields_below_threshold:
+        return Decision.REVIEW, f"Fields below auto threshold: {fields_below_threshold}"
+
+    if reconciliation and reconciliation.reconciliation_status == "warn":
+        return Decision.REVIEW, "Reconciliation warning: minor discrepancy"
+
+    if business_violations:
+        return Decision.REVIEW, f"Business rule violations: {len(business_violations)}"
+
+    if not schema_valid:
+        return Decision.REVIEW, "Schema validation failed"
+
+    return Decision.AUTO, "All validations passed"
+
+
+def calculate_overall_confidence(
+    structured: StructuredResult,
+    reconciliation: ReconciliationLog | None,
+) -> float:
+    """Calculate overall document confidence score."""
+    confidences = structured.field_confidences or {}
+
+    if not confidences:
+        return 0.5
+
+    field_confidence = sum(confidences.values()) / len(confidences)
+
+    reconciliation_factor = 1.0
+    if reconciliation:
+        if reconciliation.reconciliation_status == "fail":
+            reconciliation_factor = 0.5
+        elif reconciliation.reconciliation_status == "warn":
+            reconciliation_factor = 0.8
+        else:
+            reconciliation_factor = 1.0
+
+    overall = field_confidence * 0.7 + reconciliation_factor * 0.3
+
+    return min(max(overall, 0.0), 1.0)
+
+
+@celery_app.task(bind=True, name="workers.validation.tasks.validate_document")
+def validate_document(self, document_id: str, tenant_id: str, priority: int = 5) -> dict[str, Any]:
+    """Validate document and determine processing decision.
+
+    Args:
+        document_id: Document UUID
+        tenant_id: Tenant UUID
+        priority: Task priority (0=highest, 9=lowest)
+
+    Returns:
+        Validation result
+    """
+    start_time = time.time()
+    logger.info(f"Starting validation for document {document_id}")
+
+    try:
+        update_document(document_id, status=DocumentStatus.VALIDATING)
+
+        import asyncio
+
+        async def _get_data():
+            session = await get_db_session()
+            try:
+                doc_result = await session.execute(
+                    select(Document).where(Document.id == uuid.UUID(document_id))
+                )
+                doc = doc_result.scalar_one_or_none()
+
+                structured_result = await session.execute(
+                    select(StructuredResult).where(
+                        StructuredResult.document_id == uuid.UUID(document_id)
+                    )
+                )
+                structured = structured_result.scalar_one_or_none()
+
+                reconciliation_result = await session.execute(
+                    select(ReconciliationLog).where(
+                        ReconciliationLog.document_id == uuid.UUID(document_id)
+                    )
+                )
+                reconciliation = reconciliation_result.scalar_one_or_none()
+
+                tenant_result = await session.execute(
+                    select(Tenant).where(Tenant.id == uuid.UUID(tenant_id))
+                )
+                tenant = tenant_result.scalar_one_or_none()
+
+                # Feature 4: Supplier lookup and duplicate detection
+                supplier_match = None
+                is_duplicate = False
+                if structured:
+                    supplier_match = await lookup_supplier(
+                        uuid.UUID(tenant_id),
+                        structured.extracted_data,
+                        session,
+                    )
+                    is_duplicate = await detect_duplicate(
+                        uuid.UUID(tenant_id),
+                        structured.extracted_data,
+                        uuid.UUID(document_id),
+                        session,
+                    )
+                    # Persist supplier lookup result
+                    structured.supplier_lookup_result = supplier_match
+                    await session.commit()
+
+                return doc, structured, reconciliation, tenant, supplier_match, is_duplicate
+            finally:
+                await session.close()
+
+        doc, structured, reconciliation, tenant, supplier_match, is_duplicate = asyncio.run(_get_data())
+
+        if not doc or not structured:
+            raise ValueError(f"Document {document_id} data incomplete")
+
+        schema = load_schema(doc.document_type)
+        schema_valid, schema_errors = validate_schema(
+            structured.extracted_data,
+            schema,
+        )
+
+        business_violations = validate_business_rules(
+            structured.extracted_data,
+            doc.document_type,
+        )
+
+        decision, reasoning = determine_decision(
+            structured,
+            reconciliation,
+            schema_valid,
+            business_violations,
+            tenant=tenant,
+            is_duplicate=is_duplicate,
+            supplier_match=supplier_match,
+        )
+
+        overall_confidence = calculate_overall_confidence(structured, reconciliation)
+
+        if decision == Decision.AUTO:
+            final_status = DocumentStatus.COMPLETED
+        elif decision == Decision.REVIEW:
+            final_status = DocumentStatus.REVIEW
+        else:
+            final_status = DocumentStatus.MANUAL_REVIEW
+
+        update_document(
+            document_id,
+            status=final_status,
+            decision=decision,
+            processing_completed_at=True,
+        )
+
+        processing_time = time.time() - start_time
+
+        logger.info(
+            f"Validation completed for document {document_id}: "
+            f"decision={decision.value}, confidence={overall_confidence:.2f}"
+        )
+
+        return {
+            "document_id": document_id,
+            "status": "completed",
+            "decision": decision.value,
+            "reasoning": reasoning,
+            "overall_confidence": overall_confidence,
+            "schema_valid": schema_valid,
+            "schema_errors": schema_errors if not schema_valid else None,
+            "business_violations": business_violations if business_violations else None,
+            "reconciliation_status": reconciliation.reconciliation_status if reconciliation else None,
+            "supplier_match": supplier_match,
+            "is_duplicate": is_duplicate,
+            "processing_time": processing_time,
+        }
+
+    except Exception as exc:
+        logger.exception(f"Validation failed for document {document_id}")
+        update_document(
+            document_id,
+            status=DocumentStatus.VALIDATION_FAILED,
+            error_message=str(exc),
+            processing_completed_at=True,
+        )
+
+        raise self.retry(exc=exc, countdown=60, max_retries=3)

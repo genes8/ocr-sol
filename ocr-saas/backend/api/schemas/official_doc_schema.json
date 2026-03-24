@@ -1,0 +1,314 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ocr-saas.example.com/schemas/official_doc_v1.json",
+  "title": "Official Document Schema",
+  "description": "JSON schema for official documents (resenja, dopisi) extraction",
+  "version": "1.0",
+  "type": "object",
+  "required": ["document_number", "issue_date", "issuing_authority", "subject"],
+  "properties": {
+    "document_type": {
+      "type": "string",
+      "description": "Type of official document",
+      "enum": ["resenje", "dopis", "zakljucak", "naredjenje", "obavestenje", "izvestaj", "zapisnik", "drugi"]
+    },
+    "document_type_other": {
+      "type": "string",
+      "description": "If document_type is 'drugi', specify here"
+    },
+    "document_number": {
+      "type": "string",
+      "description": "Document reference number",
+      "minLength": 1
+    },
+    "issue_date": {
+      "type": "string",
+      "description": "Issue date in ISO 8601 format",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "receipt_date": {
+      "type": "string",
+      "description": "Date document was received",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "reference_number": {
+      "type": "string",
+      "description": "Reference to related document"
+    },
+    "issuing_authority": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "short_name": {
+          "type": "string",
+          "description": "Abbreviated name"
+        },
+        "department": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "city": {
+          "type": "string"
+        },
+        "postal_code": {
+          "type": "string"
+        },
+        "country": {
+          "type": "string",
+          "default": "Republika Srbija"
+        },
+        "phone": {
+          "type": "string"
+        },
+        "website": {
+          "type": "string",
+          "format": "uri"
+        },
+        "pib": {
+          "type": "string",
+          "pattern": "^\\d{9}$"
+        }
+      }
+    },
+    "recipient": {
+      "type": "object",
+      "description": "Primary recipient of the document",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "city": {
+          "type": "string"
+        },
+        "postal_code": {
+          "type": "string"
+        },
+        "country": {
+          "type": "string"
+        },
+        "pib": {
+          "type": "string",
+          "pattern": "^\\d{9}$"
+        },
+        "mb": {
+          "type": "string"
+        }
+      }
+    },
+    "cc_recipients": {
+      "type": "array",
+      "description": "CC recipients",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "subject": {
+      "type": "string",
+      "description": "Subject/title of the document",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "string",
+      "description": "Brief summary of the document content"
+    },
+    "legal_basis": {
+      "type": "array",
+      "description": "Legal articles/clauses referenced",
+      "items": {
+        "type": "object",
+        "properties": {
+          "law_name": {
+            "type": "string",
+            "description": "Name of the law"
+          },
+          "article": {
+            "type": "string",
+            "description": "Article number"
+          },
+          "paragraph": {
+            "type": "string",
+            "description": "Paragraph/section"
+          }
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "description": "Decision made in the document",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["approval", "rejection", "modification", "revocation", "suspension", "information", "obligation", "prohibition", "warning"]
+        },
+        "granted": {
+          "type": "boolean",
+          "description": "Whether request was granted"
+        },
+        "summary": {
+          "type": "string",
+          "description": "Summary of decision"
+        },
+        "details": {
+          "type": "string",
+          "description": "Detailed decision text"
+        }
+      }
+    },
+    "deadlines": {
+      "type": "array",
+      "description": "Important dates/deadlines mentioned",
+      "items": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Description of deadline"
+          },
+          "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "days": {
+            "type": "integer",
+            "description": "Number of days from issue date"
+          },
+          "critical": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    },
+    "fees": {
+      "type": "object",
+      "description": "Administrative fees mentioned",
+      "properties": {
+        "amount": {
+          "type": "number"
+        },
+        "currency": {
+          "type": "string",
+          "default": "RSD"
+        },
+        "account_number": {
+          "type": "string",
+          "description": "Bank account for payment"
+        },
+        "model": {
+          "type": "string",
+          "description": "Payment model"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Payment reference/purpose"
+        },
+        "deadline": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      }
+    },
+    "appeal_info": {
+      "type": "object",
+      "description": "Information about appeal process",
+      "properties": {
+        "can_appeal": {
+          "type": "boolean",
+          "default": true
+        },
+        "deadline_days": {
+          "type": "integer",
+          "description": "Days to file appeal"
+        },
+        "authority": {
+          "type": "string",
+          "description": "Appeal authority"
+        },
+        "procedure": {
+          "type": "string",
+          "description": "Appeal procedure description"
+        },
+        "fee": {
+          "type": "number",
+          "description": "Appeal fee if applicable"
+        }
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "description": "Documents attached to this official document",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "pages": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "description": "Signature block information",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "signed_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "official_seal": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether document has official seal"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": "string",
+          "default": "sr"
+        },
+        "pages": {
+          "type": "integer"
+        },
+        "classified": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether document is classified"
+        }
+      }
+    }
+  }
+}

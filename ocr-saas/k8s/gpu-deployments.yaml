@@ -1,0 +1,487 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: ocr-saas
+  labels:
+    app: vllm
+    component: gpu
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  selector:
+    app: vllm
+    component: gpu
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: ocr-saas
+  labels:
+    app: vllm
+    component: gpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm
+      component: gpu
+  template:
+    metadata:
+      labels:
+        app: vllm
+        component: gpu
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      serviceAccountName: vllm
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: vllm
+          image: ghcr.io/vllm/vllm-openai:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          args:
+            - "--model=/models/glm-ocr"
+            - "--tensor-parallel-size=1"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--trust-remote-code"
+            - "--max-model-len=4096"
+          ports:
+            - containerPort: 8000
+              name: http
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: HF_HOME
+              value: "/models"
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models-pvc
+        - name: tmp
+          emptyDir: {}
+      nodeSelector:
+        gpu-type: nvidia
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: models-pvc
+  namespace: ocr-saas
+  labels:
+    app: vllm
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm
+  namespace: ocr-saas
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-ocr
+  namespace: ocr-saas
+  labels:
+    app: worker-ocr
+    component: gpu-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-ocr
+      component: gpu-worker
+  template:
+    metadata:
+      labels:
+        app: worker-ocr
+        component: gpu-worker
+    spec:
+      serviceAccountName: worker
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: worker
+          image: ocr-saas-backend:latest
+          imagePullPolicy: IfNotPresent
+          command: ["celery", "-A", "workers.celery_app", "worker"]
+          args:
+            - "--loglevel=info"
+            - "-Q=ocr_queue"
+            - "-c=1"
+            - "--hostname=ocr@%h"
+          env:
+            - name: WORKER_TYPE
+              value: "ocr"
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres.ocr-saas.svc.cluster.local:5432/$(POSTGRES_DB)"
+            - name: REDIS_URL
+              value: "redis://redis.ocr-saas.svc.cluster.local:6379/0"
+            - name: RABBITMQ_URL
+              value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq.ocr-saas.svc.cluster.local:5672/"
+            - name: MINIO_ENDPOINT
+              value: "minio.ocr-saas.svc.cluster.local:9000"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: MINIO_USER
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: MINIO_PASSWORD
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_DB
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: VLLM_BASE_URL
+              value: "http://vllm.ocr-saas.svc.cluster.local:8000"
+            - name: VLLM_MODEL_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: ocr-saas-config
+                  key: VLLM_MODEL_NAME
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "4"
+              memory: 8Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: model-cache
+              mountPath: /root/.cache
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: model-cache
+          emptyDir: {}
+      nodeSelector:
+        gpu-type: nvidia
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+---
+# Feature 1: Dedicated structuring LLM Service (text-only, separate from GLM-OCR)
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-structuring
+  namespace: ocr-saas
+  labels:
+    app: vllm-structuring
+    component: structuring
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  selector:
+    app: vllm-structuring
+    component: structuring
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-structuring
+  namespace: ocr-saas
+  labels:
+    app: vllm-structuring
+    component: structuring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-structuring
+      component: structuring
+  template:
+    metadata:
+      labels:
+        app: vllm-structuring
+        component: structuring
+    spec:
+      serviceAccountName: vllm
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: vllm-structuring
+          image: ghcr.io/vllm/vllm-openai:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          args:
+            - "--model=/models/structuring-llm"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--trust-remote-code"
+            - "--max-model-len=4096"
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: HF_HOME
+              value: "/models"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models-pvc
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-structuring
+  namespace: ocr-saas
+  labels:
+    app: worker-structuring
+    component: gpu-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-structuring
+      component: gpu-worker
+  template:
+    metadata:
+      labels:
+        app: worker-structuring
+        component: gpu-worker
+    spec:
+      serviceAccountName: worker
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: worker
+          image: ocr-saas-backend:latest
+          imagePullPolicy: IfNotPresent
+          command: ["celery", "-A", "workers.celery_app", "worker"]
+          args:
+            - "--loglevel=info"
+            - "-Q=structuring_queue"
+            - "-c=1"
+            - "--hostname=structuring@%h"
+          env:
+            - name: WORKER_TYPE
+              value: "structuring"
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres.ocr-saas.svc.cluster.local:5432/$(POSTGRES_DB)"
+            - name: REDIS_URL
+              value: "redis://redis.ocr-saas.svc.cluster.local:6379/0"
+            - name: RABBITMQ_URL
+              value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq.ocr-saas.svc.cluster.local:5672/"
+            - name: MINIO_ENDPOINT
+              value: "minio.ocr-saas.svc.cluster.local:9000"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: MINIO_USER
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: MINIO_PASSWORD
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_DB
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: RABBITMQ_PASSWORD
+            # Feature 1: Use dedicated structuring LLM server instead of GLM-OCR
+            - name: STRUCTURING_LLM_BASE_URL
+              value: "http://vllm-structuring.ocr-saas.svc.cluster.local:8000"
+            - name: STRUCTURING_LLM_MODEL_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: ocr-saas-config
+                  key: STRUCTURING_LLM_MODEL_NAME
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: model-cache
+              mountPath: /root/.cache
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: model-cache
+          emptyDir: {}
+      nodeSelector:
+        workload: cpu
+      tolerations: []

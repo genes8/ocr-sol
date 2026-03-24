@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ocr-saas
+  labels:
+    app.kubernetes.io/name: ocr-saas
+    app.kubernetes.io/managed-by: kubectl
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ocr-saas-monitoring
+  labels:
+    app.kubernetes.io/name: monitoring
+    app.kubernetes.io/managed-by: kubectl

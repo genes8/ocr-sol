@@ -1,0 +1,240 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ocr-saas.example.com/schemas/delivery_note_v1.json",
+  "title": "Delivery Note Schema",
+  "description": "JSON schema for delivery note (otpremnica) document extraction",
+  "version": "1.0",
+  "type": "object",
+  "required": ["delivery_note_number", "issue_date", "supplier", "buyer", "items"],
+  "properties": {
+    "delivery_note_number": {
+      "type": "string",
+      "description": "Delivery note number",
+      "minLength": 1
+    },
+    "issue_date": {
+      "type": "string",
+      "description": "Issue date in ISO 8601 format",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "order_reference": {
+      "type": "string",
+      "description": "Reference to original purchase order"
+    },
+    "order_date": {
+      "type": "string",
+      "description": "Original order date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "currency": {
+      "type": "string",
+      "default": "RSD",
+      "enum": ["RSD", "EUR", "USD"]
+    },
+    "supplier": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "address": {
+          "type": "string"
+        },
+        "city": {
+          "type": "string"
+        },
+        "postal_code": {
+          "type": "string"
+        },
+        "country": {
+          "type": "string",
+          "default": "Srbija"
+        },
+        "pib": {
+          "type": "string",
+          "pattern": "^\\d{9}$"
+        },
+        "mb": {
+          "type": "string"
+        },
+        "contact_person": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        }
+      }
+    },
+    "buyer": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "address": {
+          "type": "string"
+        },
+        "city": {
+          "type": "string"
+        },
+        "postal_code": {
+          "type": "string"
+        },
+        "country": {
+          "type": "string",
+          "default": "Srbija"
+        },
+        "pib": {
+          "type": "string",
+          "pattern": "^\\d{9}$"
+        },
+        "mb": {
+          "type": "string"
+        },
+        "contact_person": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        }
+      }
+    },
+    "delivery_address": {
+      "type": "object",
+      "description": "If different from buyer address",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "city": {
+          "type": "string"
+        },
+        "postal_code": {
+          "type": "string"
+        },
+        "country": {
+          "type": "string"
+        },
+        "contact_person": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Delivered items",
+      "items": {
+        "type": "object",
+        "required": ["description", "quantity", "unit"],
+        "properties": {
+          "row_number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sku": {
+            "type": "string",
+            "description": "Product/SKU code"
+          },
+          "quantity": {
+            "type": "number",
+            "minimum": 0
+          },
+          "unit": {
+            "type": "string",
+            "default": "kom",
+            "examples": ["kom", "kg", "l", "metar", "pak"]
+          },
+          "batch_number": {
+            "type": "string",
+            "description": "Batch/lot number if applicable"
+          },
+          "serial_numbers": {
+            "type": "array",
+            "description": "Serial numbers for tracked items",
+            "items": {
+              "type": "string"
+            }
+          },
+          "ordered_quantity": {
+            "type": "number",
+            "description": "Quantity originally ordered"
+          },
+          "delivered_quantity": {
+            "type": "number",
+            "description": "Quantity being delivered"
+          },
+          "remaining_quantity": {
+            "type": "number",
+            "description": "Remaining quantity to be delivered"
+          }
+        }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "examples": ["own_vehicle", "courier", "freight", "personal_pickup"]
+        },
+        "carrier_name": {
+          "type": "string"
+        },
+        "vehicle_type": {
+          "type": "string"
+        },
+        "license_plate": {
+          "type": "string"
+        },
+        "driver_name": {
+          "type": "string"
+        },
+        "departure_time": {
+          "type": "string",
+          "description": "Time of departure"
+        }
+      }
+    },
+    "notes": {
+      "type": "string",
+      "description": "Additional notes"
+    },
+    "place_of_issue": {
+      "type": "string",
+      "description": "Place where delivery note was issued"
+    },
+    "issued_by": {
+      "type": "string",
+      "description": "Name of person issuing delivery note"
+    },
+    "received_by": {
+      "type": "string",
+      "description": "Name of person receiving goods"
+    },
+    "received_date": {
+      "type": "string",
+      "description": "Date goods were received",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "confirmation_signature": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether buyer's signature was obtained"
+    }
+  }
+}

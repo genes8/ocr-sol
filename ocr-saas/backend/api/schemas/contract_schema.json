@@ -1,0 +1,255 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ocr-saas.example.com/schemas/contract_v1.json",
+  "title": "Contract Schema",
+  "description": "JSON schema for contract document extraction",
+  "version": "1.0",
+  "type": "object",
+  "required": ["contract_number", "issue_date", "parties", "subject"],
+  "properties": {
+    "contract_number": {
+      "type": "string",
+      "description": "Contract number/identifier",
+      "minLength": 1
+    },
+    "issue_date": {
+      "type": "string",
+      "description": "Contract signing date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "contract_type": {
+      "type": "string",
+      "description": "Type of contract",
+      "enum": ["service", "sale", "lease", "employment", "partnership", "nda", "loan", "insurance", "other"]
+    },
+    "subject": {
+      "type": "string",
+      "description": "Contract subject/purpose",
+      "minLength": 1
+    },
+    "parties": {
+      "type": "array",
+      "minItems": 2,
+      "description": "Contracting parties",
+      "items": {
+        "type": "object",
+        "required": ["name", "role"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["seller", "buyer", "provider", "client", "landlord", "tenant", "employer", "employee", "lessor", "lessee", "lender", "borrower", "insurer", "insured", "party_a", "party_b"]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "address": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "postal_code": {
+            "type": "string"
+          },
+          "country": {
+            "type": "string",
+            "default": "Srbija"
+          },
+          "pib": {
+            "type": "string",
+            "pattern": "^\\d{9}$"
+          },
+          "mb": {
+            "type": "string"
+          },
+          "registration_number": {
+            "type": "string"
+          },
+          "representative": {
+            "type": "string",
+            "description": "Legal representative name"
+          },
+          "representative_title": {
+            "type": "string",
+            "description": "Title of representative"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "bank_account": {
+            "type": "string"
+          },
+          "bank_name": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "duration": {
+      "type": "object",
+      "properties": {
+        "start_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "end_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "duration_text": {
+          "type": "string",
+          "description": "Text description of duration",
+          "examples": ["12 months", "1 year", "indefinite", "until terminated"]
+        },
+        "renewable": {
+          "type": "boolean",
+          "default": false
+        },
+        "renewal_notice_days": {
+          "type": "integer",
+          "description": "Days notice required for renewal"
+        }
+      }
+    },
+    "value": {
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "number",
+          "description": "Total contract value"
+        },
+        "currency": {
+          "type": "string",
+          "default": "RSD",
+          "enum": ["RSD", "EUR", "USD"]
+        },
+        "amount_text": {
+          "type": "string",
+          "description": "Amount written in words"
+        },
+        "payment_terms": {
+          "type": "string",
+          "description": "Payment terms description"
+        },
+        "payment_schedule": {
+          "type": "string",
+          "enum": ["full_advance", "full_on_completion", "installments", "monthly", "quarterly", "custom"]
+        },
+        "installments": {
+          "type": "array",
+          "description": "Payment installments if applicable",
+          "items": {
+            "type": "object",
+            "required": ["number", "amount", "due_date"],
+            "properties": {
+              "number": {
+                "type": "integer"
+              },
+              "amount": {
+                "type": "number"
+              },
+              "due_date": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "description": {
+                "type": "string"
+              },
+              "paid": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "terms": {
+      "type": "array",
+      "description": "Key contract terms extracted",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "article_reference": {
+            "type": "string",
+            "description": "Article/clause reference"
+          }
+        }
+      }
+    },
+    "annexes": {
+      "type": "array",
+      "description": "List of annexes attached",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warranties": {
+      "type": "string",
+      "description": "Warranty terms"
+    },
+    "penalties": {
+      "type": "string",
+      "description": "Penalty clauses"
+    },
+    "termination_conditions": {
+      "type": "string",
+      "description": "Conditions for contract termination"
+    },
+    "jurisdiction": {
+      "type": "string",
+      "description": "Jurisdiction for disputes",
+      "default": "Srbija"
+    },
+    "applicable_law": {
+      "type": "string",
+      "description": "Applicable law",
+      "default": "Republika Srbija"
+    },
+    "dispute_resolution": {
+      "type": "string",
+      "enum": ["court", "arbitration", "mediation"],
+      "description": "Dispute resolution method"
+    },
+    "signatures": {
+      "type": "array",
+      "description": "Signature blocks",
+      "items": {
+        "type": "object",
+        "properties": {
+          "party_role": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "location": {
+            "type": "string"
+          },
+          "signed": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    }
+  }
+}

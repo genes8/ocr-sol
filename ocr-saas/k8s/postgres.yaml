@@ -1,0 +1,180 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ocr-saas
+  labels:
+    app: postgres
+    component: database
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: tcp-postgres
+  selector:
+    app: postgres
+    component: database
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: ocr-saas
+  labels:
+    app: postgres
+    component: database
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+      component: database
+  template:
+    metadata:
+      labels:
+        app: postgres
+        component: database
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 5432
+        fsGroup: 5432
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+              name: tcp-postgres
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - $(POSTGRES_DB)
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - $(POSTGRES_DB)
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: postgres-init
+          configMap:
+            name: postgres-init
+            optional: true
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 50Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: ocr-saas
+  labels:
+    app: postgres
+    component: database
+data:
+  init.sql: |
+    -- Enable required extensions
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+    
+    -- Create custom types
+    DO $$ BEGIN
+        CREATE TYPE document_status AS ENUM (
+            'pending', 'preprocessing', 'preprocess_failed',
+            'ocr', 'ocr_failed', 'classified',
+            'structuring', 'structuring_failed',
+            'reconciliation', 'reconciliation_failed',
+            'validating', 'validation_failed',
+            'completed', 'review', 'manual_review'
+        );
+    EXCEPTION
+        WHEN duplicate_object THEN null;
+    END $$;
+    
+    DO $$ BEGIN
+        CREATE TYPE decision AS ENUM ('auto', 'review', 'manual');
+    EXCEPTION
+        WHEN duplicate_object THEN null;
+    END $$;
+    
+    DO $$ BEGIN
+        CREATE TYPE document_type AS ENUM (
+            'invoice', 'proforma', 'delivery_note',
+            'contract', 'bank_statement', 'official_document'
+        );
+    EXCEPTION
+        WHEN duplicate_object THEN null;
+    END $$;
+    
+    -- Create indexes for performance
+    CREATE INDEX IF NOT EXISTS idx_documents_tenant ON documents(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
+    CREATE INDEX IF NOT EXISTS idx_documents_created ON documents(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(document_type);
+    
+    CREATE INDEX IF NOT EXISTS idx_ocr_results_doc ON ocr_results(document_id);
+    CREATE INDEX IF NOT EXISTS idx_structured_results_doc ON structured_results(document_id);
+    CREATE INDEX IF NOT EXISTS idx_reconciliation_logs_doc ON reconciliation_logs(document_id);
