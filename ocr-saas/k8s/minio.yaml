@@ -162,8 +162,7 @@ spec:
               mc mb local/ocr-documents --ignore-existing
               mc mb local/ocr-results --ignore-existing
               mc mb local/ocr-thumbnails --ignore-existing
-              mc anonymous set download local/ocr-documents
-              mc anonymous set public local/ocr-thumbnails
+              # All buckets are private — document access is via presigned URLs only
           env:
             - name: MINIO_ROOT_USER
               valueFrom:

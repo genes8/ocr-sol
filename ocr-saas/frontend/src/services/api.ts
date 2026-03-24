@@ -122,6 +122,8 @@ export interface DocumentResult {
     extracted_data: Record<string, unknown>;
     field_confidences: Record<string, number>;
     document_type: DocumentType;
+    /** field_name → resolved text block with bbox (set by structuring worker) */
+    bbox_evidence?: Record<string, TextBlock>;
   };
   reconciliation?: {
     status: "pass" | "warn" | "fail";
@@ -137,6 +139,8 @@ export interface TextBlock {
   bbox?: BoundingBox;
   confidence?: number;
   page?: number;
+  block_id?: string;
+  block_type?: string;
 }
 
 export interface BoundingBox {
@@ -202,6 +206,14 @@ export const documentsApi = {
     page = 1
   ): Promise<{ url: string; page: number; width?: number; height?: number }> => {
     const response = await api.get(`/documents/${documentId}/pages/${page}/image`);
+    return response.data;
+  },
+
+  updateFields: async (
+    documentId: string,
+    fields: Record<string, unknown>
+  ): Promise<{ document_id: string; updated_fields: string[] }> => {
+    const response = await api.patch(`/documents/${documentId}/fields`, { fields });
     return response.data;
   },
 

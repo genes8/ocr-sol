@@ -43,6 +43,7 @@ spec:
       labels:
         app: vllm
         component: gpu
+        role: inference
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8000"
@@ -163,6 +164,9 @@ spec:
       labels:
         app: worker-ocr
         component: gpu-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
     spec:
       serviceAccountName: worker
       terminationGracePeriodSeconds: 60
@@ -233,6 +237,14 @@ spec:
                 configMapKeyRef:
                   name: ocr-saas-config
                   key: VLLM_MODEL_NAME
+            - name: ENABLE_OCR_PIPELINE
+              valueFrom:
+                configMapKeyRef:
+                  name: ocr-saas-config
+                  key: ENABLE_OCR_PIPELINE
+          ports:
+            - containerPort: 9090
+              name: metrics
           resources:
             requests:
               cpu: "2"
@@ -304,6 +316,7 @@ spec:
       labels:
         app: vllm-structuring
         component: structuring
+        role: inference
     spec:
       serviceAccountName: vllm
       terminationGracePeriodSeconds: 120
@@ -388,6 +401,9 @@ spec:
       labels:
         app: worker-structuring
         component: gpu-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
     spec:
       serviceAccountName: worker
       terminationGracePeriodSeconds: 60
@@ -459,6 +475,14 @@ spec:
                 configMapKeyRef:
                   name: ocr-saas-config
                   key: STRUCTURING_LLM_MODEL_NAME
+            - name: ENABLE_LLM_STRUCTURING
+              valueFrom:
+                configMapKeyRef:
+                  name: ocr-saas-config
+                  key: ENABLE_LLM_STRUCTURING
+          ports:
+            - containerPort: 9090
+              name: metrics
           resources:
             requests:
               cpu: "2"

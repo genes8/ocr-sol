@@ -1,16 +1,17 @@
 import { useCallback, useState } from "react";
 import { useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   Check,
   ChevronLeft,
+  ChevronRight,
   FileText,
   RefreshCw,
   X,
 } from "lucide-react";
 import { documentsApi } from "../services/api";
-import type { BoundingBox, DocumentResult } from "../services/api";
+import type { BoundingBox, TextBlock } from "../services/api";
 import { DocumentViewer } from "../components/document-viewer";
 import { FieldEditor } from "../components/field-editor";
 
@@ -32,6 +33,7 @@ function formatFieldKey(key: string): string {
 function flattenFields(
   data: Record<string, unknown>,
   confidences: Record<string, number>,
+  bboxEvidence: Record<string, TextBlock> = {},
   prefix = ""
 ): FieldData[] {
   const fields: FieldData[] = [];
@@ -40,13 +42,14 @@ function flattenFields(
     const fullKey = prefix ? `${prefix}.${key}` : key;
 
     if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      fields.push(...flattenFields(value as Record<string, unknown>, confidences, fullKey));
+      fields.push(...flattenFields(value as Record<string, unknown>, confidences, bboxEvidence, fullKey));
     } else {
       fields.push({
         key: fullKey,
         label: formatFieldKey(key),
         value,
         confidence: confidences[fullKey] ?? 0.5,
+        bbox: bboxEvidence[fullKey]?.bbox ?? bboxEvidence[key]?.bbox,
       });
     }
   }
@@ -56,17 +59,31 @@ function flattenFields(
 
 export function Review() {
   const { id } = useParams<{ id?: string }>();
+  const queryClient = useQueryClient();
   const [selectedField, setSelectedField] = useState<string | undefined>();
+  const [selectedBbox, setSelectedBbox] = useState<BoundingBox | undefined>();
+  const [currentPage, setCurrentPage] = useState(1);
   const [zoom, setZoom] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
 
-  // Fetch document list for review queue
-  const { data: documentList, refetch: refetchList } = useQuery({
+  // Fetch both "review" and "manual_review" documents for the queue.
+  // "manual_review" includes unknown documents routed there by the classifier.
+  const { data: reviewList, refetch: refetchReview } = useQuery({
     queryKey: ["documents", "review"],
-    queryFn: () =>
-      documentsApi.list(0, 50, "review"),
+    queryFn: () => documentsApi.list(0, 50, "review"),
     enabled: !id,
   });
+  const { data: manualList, refetch: refetchManual } = useQuery({
+    queryKey: ["documents", "manual_review"],
+    queryFn: () => documentsApi.list(0, 50, "manual_review"),
+    enabled: !id,
+  });
+
+  const documentList = reviewList && manualList
+    ? { ...reviewList, items: [...reviewList.items, ...manualList.items] }
+    : reviewList ?? manualList;
+
+  const refetchList = () => { refetchReview(); refetchManual(); };
 
   // Fetch specific document
   const {
@@ -80,20 +97,21 @@ export function Review() {
     enabled: !!id,
   });
 
+  const pageCount = documentResult?.ocr_result?.page_count ?? 1;
+
   // Fetch page image URL for bbox overlay
   const { data: pageImageData } = useQuery({
-    queryKey: ["document-page-image", id, 1],
-    queryFn: () => documentsApi.getPageImageUrl(id!, 1),
+    queryKey: ["document-page-image", id, currentPage],
+    queryFn: () => documentsApi.getPageImageUrl(id!, currentPage),
     enabled: !!id && !!documentResult,
   });
 
   const handleFieldSelect = useCallback((fieldKey: string, bbox?: BoundingBox) => {
     setSelectedField(fieldKey);
+    setSelectedBbox(bbox);
     if (bbox) {
-      // Center on the bounding box
       const centerX = (bbox.x1 + bbox.x2) / 2;
       const centerY = (bbox.y1 + bbox.y2) / 2;
-      // This would need container dimensions to work properly
       setPanOffset({ x: -centerX + 400, y: -centerY + 300 });
     }
   }, []);
@@ -111,6 +129,12 @@ export function Review() {
     refetchDoc();
     refetchList();
   };
+
+  const handleFieldUpdate = useCallback(async (key: string, value: unknown) => {
+    if (!id) return;
+    await documentsApi.updateFields(id, { [key]: value });
+    queryClient.invalidateQueries({ queryKey: ["document-result", id] });
+  }, [id, queryClient]);
 
   // Document list view
   if (!id) {
@@ -235,13 +259,19 @@ export function Review() {
     );
   }
 
-  // Transform data to fields
+  // Transform data to fields — use bbox_evidence for direct coordinate mapping
   const fields: FieldData[] = documentResult.structured_data
     ? flattenFields(
         documentResult.structured_data.extracted_data,
-        documentResult.structured_data.field_confidences
+        documentResult.structured_data.field_confidences,
+        documentResult.structured_data.bbox_evidence ?? {}
       )
     : [];
+
+  // Blocks for current page only
+  const currentPageBlocks = (documentResult.ocr_result?.text_blocks ?? []).filter(
+    (b) => (b.page ?? 1) === currentPage
+  );
 
   return (
     <div className="flex flex-col h-full">
@@ -263,6 +293,28 @@ export function Review() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          {/* Page navigation */}
+          {pageCount > 1 && (
+            <div className="flex items-center gap-1 border border-gray-200 rounded-lg px-2 py-1">
+              <button
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={currentPage <= 1}
+                className="p-1 disabled:opacity-40 hover:bg-gray-100 rounded"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="text-sm text-gray-600 px-1">
+                {currentPage} / {pageCount}
+              </span>
+              <button
+                onClick={() => setCurrentPage((p) => Math.min(pageCount, p + 1))}
+                disabled={currentPage >= pageCount}
+                className="p-1 disabled:opacity-40 hover:bg-gray-100 rounded"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
           <button
             onClick={handleReject}
             className="flex items-center gap-2 px-4 py-2 text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
@@ -286,8 +338,8 @@ export function Review() {
         <div className="flex-1 bg-gray-100 p-4">
           <DocumentViewer
             imageUrl={pageImageData?.url}
-            textBlocks={documentResult.ocr_result?.text_blocks}
-            selectedField={selectedField}
+            textBlocks={currentPageBlocks}
+            selectedBbox={selectedBbox}
             onFieldSelect={handleFieldSelect}
             zoom={zoom}
             panOffset={panOffset}
@@ -300,6 +352,7 @@ export function Review() {
         <div className="w-96 bg-gray-50 border-l border-gray-200 overflow-hidden">
           <FieldEditor
             fields={fields}
+            onFieldUpdate={handleFieldUpdate}
             onFieldSelect={handleFieldSelect}
             selectedField={selectedField}
           />

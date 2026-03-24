@@ -1,5 +1,6 @@
 """Pydantic schemas for API request/response models."""
 
+import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -269,3 +270,31 @@ class TenantSettingsUpdate(BaseModel):
     """Schema for updating tenant settings (e.g. plan)."""
 
     settings: dict[str, Any]
+
+
+class FieldCorrectionRequest(BaseModel):
+    """Request to correct specific fields in extracted data."""
+
+    fields: dict[str, Any]
+
+
+class FieldCorrectionResponse(BaseModel):
+    """Response after applying field corrections."""
+
+    document_id: UUID
+    updated_fields: list[str]
+    structured_result_id: UUID
+
+
+class AuditLogEntry(BaseModel):
+    """Single audit log entry."""
+
+    id: UUID
+    tenant_id: UUID
+    document_id: UUID | None = None
+    actor: str
+    event: str
+    payload: dict[str, Any] | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

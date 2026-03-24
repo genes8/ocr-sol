@@ -54,6 +54,14 @@ data:
   CONFIDENCE_THRESHOLD_AUTO: "0.85"
   CONFIDENCE_THRESHOLD_REVIEW: "0.70"
   CONFIDENCE_THRESHOLD_MANUAL: "0.50"
+
+  # Feature flags — set to "false" to disable a pipeline stage (e.g. during canary rollout)
+  ENABLE_OCR_PIPELINE: "true"
+  ENABLE_LLM_STRUCTURING: "true"
+  ENABLE_RECONCILIATION: "true"
+
+  # Structuring LLM
+  STRUCTURING_LLM_MODEL_NAME: "structuring-llm"
 ---
 apiVersion: v1
 kind: ConfigMap

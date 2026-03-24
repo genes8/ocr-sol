@@ -51,6 +51,9 @@ spec:
             - "-Q=preprocess_queue"
             - "-c=2"
             - "--hostname=preprocess@%h"
+          ports:
+            - containerPort: 9090
+              name: metrics
           env:
             - name: WORKER_TYPE
               value: "preprocessing"
@@ -150,6 +153,9 @@ spec:
       labels:
         app: worker-classification
         component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
     spec:
       serviceAccountName: worker
       terminationGracePeriodSeconds: 60
@@ -167,6 +173,9 @@ spec:
             - "-Q=classification_queue"
             - "-c=2"
             - "--hostname=classification@%h"
+          ports:
+            - containerPort: 9090
+              name: metrics
           env:
             - name: WORKER_TYPE
               value: "classification"
@@ -252,6 +261,9 @@ spec:
       labels:
         app: worker-reconciliation
         component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
     spec:
       serviceAccountName: worker
       terminationGracePeriodSeconds: 60
@@ -269,6 +281,9 @@ spec:
             - "-Q=reconciliation_queue"
             - "-c=2"
             - "--hostname=reconciliation@%h"
+          ports:
+            - containerPort: 9090
+              name: metrics
           env:
             - name: WORKER_TYPE
               value: "reconciliation"
@@ -315,6 +330,11 @@ spec:
                 secretKeyRef:
                   name: ocr-saas-secrets
                   key: RABBITMQ_PASSWORD
+            - name: ENABLE_RECONCILIATION
+              valueFrom:
+                configMapKeyRef:
+                  name: ocr-saas-config
+                  key: ENABLE_RECONCILIATION
           resources:
             requests:
               cpu: 250m
@@ -354,6 +374,9 @@ spec:
       labels:
         app: worker-validation
         component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
     spec:
       serviceAccountName: worker
       terminationGracePeriodSeconds: 60
@@ -371,6 +394,9 @@ spec:
             - "-Q=validation_queue"
             - "-c=2"
             - "--hostname=validation@%h"
+          ports:
+            - containerPort: 9090
+              name: metrics
           env:
             - name: WORKER_TYPE
               value: "validation"
@@ -439,6 +465,115 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-review
+  namespace: ocr-saas
+  labels:
+    app: worker-review
+    component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-review
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: worker-review
+        component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: worker
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: worker
+          image: ocr-saas-backend:latest
+          imagePullPolicy: IfNotPresent
+          command: ["celery", "-A", "workers.celery_app", "worker"]
+          args:
+            - "--loglevel=info"
+            - "-Q=review_queue"
+            - "-c=2"
+            - "--hostname=review@%h"
+          ports:
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: WORKER_TYPE
+              value: "review"
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres.ocr-saas.svc.cluster.local:5432/$(POSTGRES_DB)"
+            - name: REDIS_URL
+              value: "redis://redis.ocr-saas.svc.cluster.local:6379/0"
+            - name: RABBITMQ_URL
+              value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq.ocr-saas.svc.cluster.local:5672/"
+            - name: MINIO_ENDPOINT
+              value: "minio.ocr-saas.svc.cluster.local:9000"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: MINIO_USER
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: MINIO_PASSWORD
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: POSTGRES_DB
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocr-saas-secrets
+                  key: RABBITMQ_PASSWORD
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
           volumeMounts:
             - name: tmp
               mountPath: /tmp

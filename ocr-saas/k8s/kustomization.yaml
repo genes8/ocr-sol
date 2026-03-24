@@ -16,6 +16,8 @@ resources:
   - frontend-deployment.yaml
   - hpa.yaml
   - monitoring.yaml
+  - network-policy.yaml
+  - keda-scaledobjects.yaml
 
 commonLabels:
   app.kubernetes.io/name: ocr-saas

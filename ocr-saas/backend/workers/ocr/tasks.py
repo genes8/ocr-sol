@@ -1,6 +1,7 @@
 """OCR worker tasks - vLLM GLM-OCR integration."""
 
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -12,14 +13,45 @@ from typing import Any
 import requests
 from PIL import Image
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from api.core.config import settings
-from api.core.database import SyncSessionLocal
+from api.core.database import SyncSessionLocal, get_db_session
 from api.core.storage import get_minio_client
 from api.models.db import Document, DocumentStatus, OCRResult
 from workers.celery_app import celery_app
 from workers.llm_utils import strip_llm_fences
+
+
+def write_audit_event(
+    tenant_id: str,
+    event: str,
+    document_id: str | None = None,
+    actor: str = "system",
+    payload: dict | None = None,
+) -> None:
+    """Write audit event from sync worker context."""
+    import asyncio
+
+    async def _write():
+        from api.core.audit import write_audit
+        import uuid as _uuid
+        session = await get_db_session()
+        try:
+            await write_audit(
+                session,
+                _uuid.UUID(tenant_id),
+                event,
+                document_id=_uuid.UUID(document_id) if document_id else None,
+                actor=actor,
+                payload=payload,
+            )
+            await session.commit()
+        finally:
+            await session.close()
+
+    asyncio.run(_write())
 
 logger = logging.getLogger(__name__)
 
@@ -92,25 +124,40 @@ def save_ocr_result(
     page_count: int,
     processing_time_ms: int,
 ) -> str:
-    """Save OCR result to database.
-    
+    """Save OCR result to database (upsert — idempotent per document).
+
     Returns:
         OCR result ID
     """
     session = get_sync_session()
     try:
-        ocr_result = OCRResult(
-            id=uuid.uuid4(),
-            document_id=uuid.UUID(document_id),
-            full_text=full_text,
-            text_blocks=text_blocks,
-            page_count=page_count,
-            processing_time_ms=processing_time_ms,
-            model_version=settings.VLLM_MODEL_NAME,
+        new_id = uuid.uuid4()
+        stmt = (
+            pg_insert(OCRResult)
+            .values(
+                id=new_id,
+                document_id=uuid.UUID(document_id),
+                full_text=full_text,
+                text_blocks=text_blocks,
+                page_count=page_count,
+                processing_time_ms=processing_time_ms,
+                model_version=settings.VLLM_MODEL_NAME,
+            )
+            .on_conflict_do_update(
+                constraint="uq_ocr_results_document",
+                set_={
+                    "full_text": full_text,
+                    "text_blocks": text_blocks,
+                    "page_count": page_count,
+                    "processing_time_ms": processing_time_ms,
+                    "model_version": settings.VLLM_MODEL_NAME,
+                },
+            )
+            .returning(OCRResult.id)
         )
-        session.add(ocr_result)
+        result = session.execute(stmt)
         session.commit()
-        return str(ocr_result.id)
+        return str(result.scalar_one())
     finally:
         session.close()
 
@@ -153,11 +200,14 @@ Return a JSON object with the following structure:
         {
             "text": "extracted text",
             "bbox": {"x1": 0, "y1": 0, "x2": 100, "y2": 50},
-            "confidence": 0.95
+            "confidence": 0.95,
+            "block_type": "text"
         }
     ],
     "full_text": "all extracted text combined"
-}"""
+}
+
+block_type must be one of: text, table_cell, header, footer, logo, stamp, signature"""
                     }
                 ]
             }
@@ -238,6 +288,7 @@ def fallback_ocr(image: Image.Image) -> dict[str, Any]:
                         "y2": int(data["top"][i] + data["height"][i]),
                     },
                     "confidence": float(data["conf"][i]) / 100 if data["conf"][i] != -1 else 0.5,
+                    "block_type": "text",
                 })
         
         # Estimate overall confidence from Tesseract confidence
@@ -261,6 +312,16 @@ def fallback_ocr(image: Image.Image) -> dict[str, Any]:
             "full_text": "",
             "error": str(e),
         }
+
+
+def _stable_block_id(page: int, text: str, bbox: dict) -> str:
+    """Deterministic block ID stable across retries.
+
+    Uses SHA-1 of (page, text[:80], bbox coords) so the same physical block
+    always gets the same ID regardless of array position or reprocessing order.
+    """
+    key = f"{page}|{text[:80]}|{bbox.get('x1')}|{bbox.get('y1')}|{bbox.get('x2')}|{bbox.get('y2')}"
+    return "blk-" + hashlib.sha1(key.encode()).hexdigest()[:16]
 
 
 def process_single_page(
@@ -318,7 +379,13 @@ def process_ocr(self, document_id: str, tenant_id: str, priority: int = 5) -> di
     """
     start_time = time.time()
     logger.info(f"Starting OCR for document {document_id}")
-    
+
+    # Feature flag gate — canary/rollback support
+    if not settings.ENABLE_OCR_PIPELINE:
+        logger.warning(f"OCR pipeline disabled (feature flag). Routing document {document_id} to MANUAL_REVIEW.")
+        update_document_status(document_id, DocumentStatus.MANUAL_REVIEW, error_message="ocr_pipeline_disabled")
+        return {"document_id": document_id, "status": "manual_review", "reason": "ocr_pipeline_disabled"}
+
     try:
         # Update status
         update_document_status(document_id, DocumentStatus.OCR)
@@ -339,11 +406,16 @@ def process_ocr(self, document_id: str, tenant_id: str, priority: int = 5) -> di
         # Combine results
         full_text = "\n\n".join(r["full_text"] for r in page_results)
         
-        # Merge text blocks with page info
+        # Merge text blocks with page info + stable block IDs
         all_text_blocks = []
         for result in page_results:
             for block in result["text_blocks"]:
                 block["page"] = result["page"]
+                block["block_id"] = _stable_block_id(
+                    result["page"],
+                    block.get("text", ""),
+                    block.get("bbox", {}),
+                )
                 all_text_blocks.append(block)
         
         processing_time_ms = int((time.time() - start_time) * 1000)
@@ -365,6 +437,12 @@ def process_ocr(self, document_id: str, tenant_id: str, priority: int = 5) -> di
         )
 
         processing_time = time.time() - start_time
+        write_audit_event(
+            tenant_id, "pipeline.ocr.completed", document_id,
+            actor="worker:ocr",
+            payload={"pages": len(pages), "text_blocks": len(all_text_blocks),
+                     "processing_time_s": round(processing_time, 2)},
+        )
 
         logger.info(
             f"OCR completed for document {document_id} "

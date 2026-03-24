@@ -11,8 +11,37 @@ from sqlalchemy import select
 
 from api.core.config import settings
 from api.core.database import get_db_session
-from api.models.db import Document, DocumentStatus, DocumentType, OCRResult
+from api.models.db import Decision, Document, DocumentStatus, DocumentType, OCRResult
 from workers.celery_app import celery_app
+
+
+def write_audit_event(
+    tenant_id: str,
+    event: str,
+    document_id: str | None = None,
+    actor: str = "system",
+    payload: dict | None = None,
+) -> None:
+    """Write audit event from async worker context."""
+    import asyncio
+
+    async def _write():
+        from api.core.audit import write_audit
+        session = await get_db_session()
+        try:
+            await write_audit(
+                session,
+                uuid.UUID(tenant_id),
+                event,
+                document_id=uuid.UUID(document_id) if document_id else None,
+                actor=actor,
+                payload=payload,
+            )
+            await session.commit()
+        finally:
+            await session.close()
+
+    asyncio.run(_write())
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +134,27 @@ CLASSIFICATION_PATTERNS = {
 }
 
 
+def _set_document_decision(document_id: str, decision: Decision, reasoning: str) -> None:
+    """Set document decision directly in database."""
+    import asyncio
+
+    async def _update():
+        session = await get_db_session()
+        try:
+            result = await session.execute(
+                select(Document).where(Document.id == uuid.UUID(document_id))
+            )
+            doc = result.scalar_one_or_none()
+            if doc:
+                doc.decision = decision
+                doc.error_message = reasoning
+                await session.commit()
+        finally:
+            await session.close()
+
+    asyncio.run(_update())
+
+
 def update_document_status(
     document_id: str,
     status: DocumentStatus,
@@ -163,25 +213,35 @@ def classify_document(text: str) -> ClassificationResult:
             matched[doc_type] = list(set(type_matches))  # Deduplicate
     
     if not scores:
-        # Default to official document if no patterns match
+        # No patterns matched at all — return sentinel with confidence=0.0
+        # so the task routes directly to MANUAL_REVIEW as "unknown" document.
         return ClassificationResult(
             document_type=DocumentType.OFFICIAL_DOCUMENT,
-            confidence=0.3,
+            confidence=0.0,
             matched_patterns=[],
-            reasoning="No specific document type patterns detected",
+            reasoning="No document type patterns detected — unknown document",
         )
     
     # Get the highest scoring type
     best_type = max(scores, key=scores.get)
     best_score = scores[best_type]
-    
-    # Normalize confidence
-    max_possible_score = sum(0.2 * len(cfg["keywords"]) for cfg in CLASSIFICATION_PATTERNS.values())
-    normalized_confidence = best_score / max_possible_score if max_possible_score > 0 else best_score
-    
+
+    # Confidence = best_score (already in [0, 1] due to min(..., 1.0) above).
+    # The old code divided by the global sum of ALL classes' max scores (~8.8),
+    # which made confidence 5-10x too low and triggered false MANUAL_REVIEW.
+    # Instead, use the raw per-class score directly.
+    confidence = best_score
+
+    # Bonus for unambiguous classification: no competing class scored similarly.
+    if len(scores) > 1:
+        second_best = sorted(scores.values(), reverse=True)[1]
+        margin = best_score - second_best
+        # Each unit of margin adds a small bonus (capped so total stays ≤ 1.0)
+        confidence = min(confidence + margin * 0.25, 1.0)
+
     return ClassificationResult(
         document_type=best_type,
-        confidence=min(normalized_confidence, 1.0),
+        confidence=confidence,
         matched_patterns=matched.get(best_type, []),
         reasoning=f"Matched {len(matched.get(best_type, []))} patterns for {best_type.value}",
     )
@@ -281,13 +341,41 @@ def classify_document_task(self, document_id: str, tenant_id: str, priority: int
         
         # Classify document
         classification = classify_document(ocr_result.full_text)
-        
+
+        # Route to MANUAL_REVIEW for unknown docs (confidence=0) or below threshold
+        if classification.confidence == 0.0:
+            reason = "unknown_document_type"
+        elif classification.confidence < settings.DEFAULT_CLASSIFICATION_CONFIDENCE:
+            reason = "low_classification_confidence"
+        else:
+            reason = None
+
+        if reason:
+            update_document_status(
+                document_id,
+                DocumentStatus.MANUAL_REVIEW,
+                document_type=classification.document_type,
+                error_message=f"{reason}: confidence={classification.confidence:.2f}",
+            )
+            _set_document_decision(document_id, Decision.MANUAL, reason)
+            write_audit_event(
+                tenant_id, "pipeline.classification.unknown", document_id,
+                actor="worker:classification",
+                payload={"reason": reason, "confidence": classification.confidence},
+            )
+            return {
+                "document_id": document_id,
+                "status": "manual_review",
+                "reason": reason,
+                "confidence": classification.confidence,
+            }
+
         # Extract additional fields
         specific_fields = extract_document_specific_fields(
             ocr_result.full_text,
             classification.document_type,
         )
-        
+
         # Update document with type
         update_document_status(
             document_id,
@@ -303,13 +391,23 @@ def classify_document_task(self, document_id: str, tenant_id: str, priority: int
         )
 
         processing_time = time.time() - start_time
-        
+
+        write_audit_event(
+            tenant_id, "pipeline.classification.completed", document_id,
+            actor="worker:classification",
+            payload={
+                "document_type": classification.document_type.value,
+                "confidence": round(classification.confidence, 3),
+                "processing_time_s": round(processing_time, 2),
+            },
+        )
+
         logger.info(
             f"Classification completed for document {document_id}: "
             f"type={classification.document_type.value}, "
             f"confidence={classification.confidence:.2f}"
         )
-        
+
         return {
             "document_id": document_id,
             "status": "completed",

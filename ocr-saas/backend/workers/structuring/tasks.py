@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
@@ -19,9 +20,39 @@ from api.models.db import (
     DocumentType,
     OCRResult,
     StructuredResult,
+    Tenant,
 )
 from workers.celery_app import celery_app
 from workers.llm_utils import strip_llm_fences
+
+
+def write_audit_event(
+    tenant_id: str,
+    event: str,
+    document_id: str | None = None,
+    actor: str = "system",
+    payload: dict | None = None,
+) -> None:
+    """Write audit event from async worker context."""
+    import asyncio
+
+    async def _write():
+        from api.core.audit import write_audit
+        session = await get_db_session()
+        try:
+            await write_audit(
+                session,
+                uuid.UUID(tenant_id),
+                event,
+                document_id=uuid.UUID(document_id) if document_id else None,
+                actor=actor,
+                payload=payload,
+            )
+            await session.commit()
+        finally:
+            await session.close()
+
+    asyncio.run(_write())
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +175,15 @@ def call_llm_for_extraction(
     text: str,
     document_type: DocumentType,
     text_blocks: list[dict[str, Any]] | None = None,
+    schema_override: dict[str, Any] | None = None,
+    system_prompt_override: str | None = None,
 ) -> dict[str, Any]:
     """Call Structuring LLM for structured extraction.
 
     Uses STRUCTURING_LLM_BASE_URL (separate server from GLM-OCR vision model).
+    Supports per-tenant schema and system prompt overrides.
     """
-    schema = load_schema(document_type)
+    schema = schema_override or load_schema(document_type)
     prompt = build_extraction_prompt(text, document_type, schema, text_blocks)
 
     import requests
@@ -157,10 +191,11 @@ def call_llm_for_extraction(
     # Feature 1: Use dedicated structuring LLM server (not GLM-OCR)
     url = f"{settings.STRUCTURING_LLM_BASE_URL}/v1/chat/completions"
 
+    system_content = system_prompt_override or "You are a precise document extraction assistant."
     payload = {
         "model": settings.STRUCTURING_LLM_MODEL_NAME,
         "messages": [
-            {"role": "system", "content": "You are a precise document extraction assistant."},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,
@@ -198,25 +233,72 @@ def call_llm_for_extraction(
         raise
 
 
-def extract_line_items(text: str) -> list[dict[str, Any]]:
-    """Extract line items from invoice text."""
-    line_items = []
-    lines = text.split("\n")
+def normalize_extracted_data(
+    data: dict[str, Any],
+    document_type: DocumentType,
+) -> dict[str, Any]:
+    """Normalize LLM-extracted data to canonical field names for the pipeline.
 
-    for line in lines:
-        if any(h in line.lower() for h in ["opis", "description", "količina", "quantity", "cena", "price"]):
-            continue
+    Key normalizations:
+    - delivery_note: schema uses `items` array → pipeline needs `line_items`
+    - all line-item types: ensure canonical keys (description, quantity, unit_price,
+      line_total, vat_rate) are present, merging from common aliases.
+    """
+    import copy
+    data = copy.deepcopy(data)
 
-        import re
-        numbers = re.findall(r"[\d.,]+", line)
-        if len(numbers) >= 2:
-            item = {
-                "raw_text": line.strip(),
-                "values": numbers,
+    # delivery_note: map `items` → `line_items`
+    if document_type == DocumentType.DELIVERY_NOTE:
+        if "items" in data and "line_items" not in data:
+            raw_items = data.pop("items", [])
+            line_items = []
+            for item in raw_items:
+                line_items.append({
+                    "description": item.get("description", ""),
+                    "quantity": item.get("quantity") or item.get("delivered_quantity"),
+                    "unit": item.get("unit", "kom"),
+                    "sku": item.get("sku"),
+                    "batch_number": item.get("batch_number"),
+                    # delivery notes usually lack pricing — preserve if present
+                    "unit_price": item.get("unit_price"),
+                    "line_total": item.get("line_total"),
+                    "vat_rate": item.get("vat_rate"),
+                })
+            data["line_items"] = line_items
+
+    # Normalize existing line_items to canonical keys
+    raw_items = data.get("line_items", [])
+    if raw_items:
+        normalized = []
+        for item in raw_items:
+            # Skip already-garbage items (raw_text-only from old extract_line_items)
+            if set(item.keys()) == {"raw_text", "values"}:
+                continue
+            norm: dict[str, Any] = {
+                "description": (
+                    item.get("description")
+                    or item.get("name")
+                    or item.get("item_name")
+                    or item.get("raw_text", "")
+                ),
+                "quantity": item.get("quantity") or item.get("qty"),
+                "unit_price": item.get("unit_price") or item.get("price") or item.get("unit_cost"),
+                "line_total": (
+                    item.get("line_total")
+                    or item.get("total")
+                    or item.get("amount")
+                    or item.get("subtotal")
+                ),
+                "vat_rate": item.get("vat_rate"),
             }
-            line_items.append(item)
+            # Preserve any extra fields (unit, sku, batch_number, …)
+            for k, v in item.items():
+                if k not in norm:
+                    norm[k] = v
+            normalized.append(norm)
+        data["line_items"] = normalized
 
-    return line_items
+    return data
 
 
 async def save_structured_result(
@@ -228,27 +310,44 @@ async def save_structured_result(
     processing_time_ms: int,
     bbox_evidence: dict[str, Any] | None = None,
 ) -> str:
-    """Save structured result to database.
+    """Save structured result to database (upsert — idempotent per document).
 
     Returns:
         Structured result ID
     """
     session = await get_db_session()
     try:
-        result = StructuredResult(
-            id=uuid.uuid4(),
-            document_id=uuid.UUID(document_id),
-            document_type=document_type,
-            extracted_data=extracted_data,
-            field_confidences=field_confidences,
-            raw_llm_response=raw_llm_response,
-            model_version=settings.STRUCTURING_LLM_MODEL_NAME,
-            processing_time_ms=processing_time_ms,
-            bbox_evidence=bbox_evidence,
+        new_id = uuid.uuid4()
+        stmt = (
+            pg_insert(StructuredResult)
+            .values(
+                id=new_id,
+                document_id=uuid.UUID(document_id),
+                document_type=document_type,
+                extracted_data=extracted_data,
+                field_confidences=field_confidences,
+                raw_llm_response=raw_llm_response,
+                model_version=settings.STRUCTURING_LLM_MODEL_NAME,
+                processing_time_ms=processing_time_ms,
+                bbox_evidence=bbox_evidence,
+            )
+            .on_conflict_do_update(
+                constraint="uq_structured_results_document",
+                set_={
+                    "document_type": document_type,
+                    "extracted_data": extracted_data,
+                    "field_confidences": field_confidences,
+                    "raw_llm_response": raw_llm_response,
+                    "model_version": settings.STRUCTURING_LLM_MODEL_NAME,
+                    "processing_time_ms": processing_time_ms,
+                    "bbox_evidence": bbox_evidence,
+                },
+            )
+            .returning(StructuredResult.id)
         )
-        session.add(result)
+        result = await session.execute(stmt)
         await session.commit()
-        return str(result.id)
+        return str(result.scalar_one())
     finally:
         await session.close()
 
@@ -267,6 +366,12 @@ def extract_structure(self, document_id: str, tenant_id: str, priority: int = 5)
     """
     start_time = time.time()
     logger.info(f"Starting structuring for document {document_id}")
+
+    # Feature flag gate — canary/rollback support
+    if not settings.ENABLE_LLM_STRUCTURING:
+        logger.warning(f"LLM structuring disabled (feature flag). Routing document {document_id} to MANUAL_REVIEW.")
+        update_document_status(document_id, DocumentStatus.MANUAL_REVIEW, error_message="llm_structuring_disabled")
+        return {"document_id": document_id, "status": "manual_review", "reason": "llm_structuring_disabled"}
 
     try:
         update_document_status(document_id, DocumentStatus.STRUCTURING)
@@ -294,30 +399,49 @@ def extract_structure(self, document_id: str, tenant_id: str, priority: int = 5)
                 if not ocr:
                     raise ValueError(f"No OCR result for document {document_id}")
 
-                return doc, ocr
+                # Load tenant settings for per-tenant routing (Task P1.15)
+                tenant_result = await session.execute(
+                    select(Tenant).where(Tenant.id == doc.tenant_id)
+                )
+                tenant = tenant_result.scalar_one_or_none()
+                tenant_settings = (tenant.settings or {}) if tenant else {}
+
+                return doc, ocr, tenant_settings
             finally:
                 await session.close()
 
-        doc, ocr_result = asyncio.run(_get_doc_and_ocr())
+        doc, ocr_result, tenant_settings = asyncio.run(_get_doc_and_ocr())
+
+        # Per-tenant schema/prompt routing
+        # tenant.settings.schema_overrides: {"invoice": {...schema...}, ...}
+        # tenant.settings.system_prompt: "Custom system prompt text"
+        schema_overrides = tenant_settings.get("schema_overrides", {})
+        schema_override = schema_overrides.get(doc.document_type.value) if schema_overrides else None
+        system_prompt_override = tenant_settings.get("system_prompt")
 
         # Feature 2: Pass text_blocks so LLM can reference them for bbox evidence
         extraction = call_llm_for_extraction(
             ocr_result.full_text,
             doc.document_type,
             text_blocks=ocr_result.text_blocks,
+            schema_override=schema_override,
+            system_prompt_override=system_prompt_override,
         )
 
         LINE_ITEM_TYPES = {DocumentType.INVOICE, DocumentType.PROFORMA, DocumentType.DELIVERY_NOTE}
-        if doc.document_type in LINE_ITEM_TYPES:
-            line_items = extract_line_items(ocr_result.full_text)
-            extraction["extracted_data"]["line_items"] = line_items
+
+        # Normalize extracted data to canonical field names before persisting
+        normalized_data = normalize_extracted_data(
+            extraction.get("extracted_data", {}),
+            doc.document_type,
+        )
 
         processing_time_ms = int((time.time() - start_time) * 1000)
 
         asyncio.run(save_structured_result(
             document_id=document_id,
             document_type=doc.document_type,
-            extracted_data=extraction.get("extracted_data", {}),
+            extracted_data=normalized_data,
             field_confidences=extraction.get("field_confidences", {}),
             raw_llm_response=json.dumps(extraction),
             processing_time_ms=processing_time_ms,
@@ -340,6 +464,16 @@ def extract_structure(self, document_id: str, tenant_id: str, priority: int = 5)
             )
 
         processing_time = time.time() - start_time
+        write_audit_event(
+            tenant_id, "pipeline.structuring.completed", document_id,
+            actor="worker:structuring",
+            payload={
+                "document_type": doc.document_type.value,
+                "fields_extracted": len(extraction.get("extracted_data", {})),
+                "schema_override_applied": schema_override is not None,
+                "processing_time_s": round(processing_time, 2),
+            },
+        )
 
         logger.info(
             f"Structuring completed for document {document_id} "

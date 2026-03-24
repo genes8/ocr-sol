@@ -1,0 +1,199 @@
+# KEDA ScaledObjects — scale workers by RabbitMQ queue depth
+#
+# Prerequisites:
+#   helm repo add kedacore https://kedacore.github.io/charts
+#   helm install keda kedacore/keda -n keda --create-namespace
+#
+# RabbitMQ management plugin must be enabled (default in rabbitmq:3-management image).
+# KEDA uses the HTTP API trigger to query queue depth.
+# managementURI uses FQDN so KEDA (in its own namespace) can reach RabbitMQ.
+---
+# TriggerAuthentication — shared credentials for all ScaledObjects
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: rabbitmq-trigger-auth
+  namespace: ocr-saas
+spec:
+  secretTargetRef:
+    - parameter: username
+      name: ocr-saas-secrets
+      key: RABBITMQ_USER
+    - parameter: password
+      name: ocr-saas-secrets
+      key: RABBITMQ_PASSWORD
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-preprocess-scaledobject
+  namespace: ocr-saas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker-preprocess
+  minReplicaCount: 1
+  maxReplicaCount: 8
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+    - type: rabbitmq
+      authenticationRef:
+        name: rabbitmq-trigger-auth
+      metadata:
+        protocol: http
+        managementURI: http://rabbitmq.ocr-saas.svc.cluster.local:15672
+        queueName: preprocess_queue
+        mode: QueueLength
+        value: "5"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-ocr-scaledobject
+  namespace: ocr-saas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker-ocr
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+    - type: rabbitmq
+      authenticationRef:
+        name: rabbitmq-trigger-auth
+      metadata:
+        protocol: http
+        managementURI: http://rabbitmq.ocr-saas.svc.cluster.local:15672
+        queueName: ocr_queue
+        mode: QueueLength
+        value: "3"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-classification-scaledobject
+  namespace: ocr-saas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker-classification
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+    - type: rabbitmq
+      authenticationRef:
+        name: rabbitmq-trigger-auth
+      metadata:
+        protocol: http
+        managementURI: http://rabbitmq.ocr-saas.svc.cluster.local:15672
+        queueName: classification_queue
+        mode: QueueLength
+        value: "5"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-structuring-scaledobject
+  namespace: ocr-saas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker-structuring
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+    - type: rabbitmq
+      authenticationRef:
+        name: rabbitmq-trigger-auth
+      metadata:
+        protocol: http
+        managementURI: http://rabbitmq.ocr-saas.svc.cluster.local:15672
+        queueName: structuring_queue
+        mode: QueueLength
+        value: "3"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-reconciliation-scaledobject
+  namespace: ocr-saas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker-reconciliation
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+    - type: rabbitmq
+      authenticationRef:
+        name: rabbitmq-trigger-auth
+      metadata:
+        protocol: http
+        managementURI: http://rabbitmq.ocr-saas.svc.cluster.local:15672
+        queueName: reconciliation_queue
+        mode: QueueLength
+        value: "5"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-validation-scaledobject
+  namespace: ocr-saas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker-validation
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+    - type: rabbitmq
+      authenticationRef:
+        name: rabbitmq-trigger-auth
+      metadata:
+        protocol: http
+        managementURI: http://rabbitmq.ocr-saas.svc.cluster.local:15672
+        queueName: validation_queue
+        mode: QueueLength
+        value: "5"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-review-scaledobject
+  namespace: ocr-saas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker-review
+  minReplicaCount: 1
+  maxReplicaCount: 4
+  cooldownPeriod: 120
+  pollingInterval: 30
+  triggers:
+    - type: rabbitmq
+      authenticationRef:
+        name: rabbitmq-trigger-auth
+      metadata:
+        protocol: http
+        managementURI: http://rabbitmq.ocr-saas.svc.cluster.local:15672
+        queueName: review_queue
+        mode: QueueLength
+        value: "3"

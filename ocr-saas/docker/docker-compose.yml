@@ -13,7 +13,8 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+      # init-db.sql removed — schema is managed by Alembic migrations only.
+      # On first run: docker compose exec api alembic upgrade head
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ocr_saas"]
       interval: 5s
@@ -56,13 +57,13 @@ services:
   minio:
     image: minio/minio:latest
     container_name: ocr-saas-minio
-    command: server /data --console-address ":9001"
+    command: server /data
     environment:
       MINIO_ROOT_USER: ${MINIO_USER:-ocr_saas}
       MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-ocr_saas_secret}
+      MINIO_BROWSER: "off"
     ports:
       - "9000:9000"
-      - "9001:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -84,8 +85,8 @@ services:
       mc mb local/ocr-documents --ignore-existing;
       mc mb local/ocr-results --ignore-existing;
       mc mb local/ocr-thumbnails --ignore-existing;
-      mc anonymous set public local/ocr-thumbnails;
       exit 0;
+      # NOTE: No public/anonymous bucket policies — all access is via presigned URLs only
       "
 
   # FastAPI Backend

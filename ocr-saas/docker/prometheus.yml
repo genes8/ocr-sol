@@ -1,0 +1,50 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: docker-compose
+
+alerting:
+  alertmanagers: []
+
+rule_files: []
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: ocr-api
+    static_configs:
+      - targets: ["api:8000"]
+    metrics_path: /metrics
+
+  # Celery workers expose metrics via prometheus_client.start_http_server on port 9090
+  - job_name: ocr-workers
+    static_configs:
+      - targets:
+          - "worker-preprocess:9090"
+          - "worker-ocr:9090"
+          - "worker-classification:9090"
+          - "worker-structuring:9090"
+          - "worker-reconciliation:9090"
+          - "worker-validation:9090"
+          - "worker-review:9090"
+
+  - job_name: rabbitmq
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+    metrics_path: /metrics
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+
+  - job_name: minio
+    static_configs:
+      - targets: ["minio:9000"]
+    metrics_path: /minio/v2/metrics/cluster

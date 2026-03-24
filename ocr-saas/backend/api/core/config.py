@@ -4,6 +4,16 @@ from functools import lru_cache
 from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Secrets that must never be defaults in production
+_INSECURE_DEFAULTS = {
+    "change-me-in-production-use-strong-random-key",
+    "ocr_saas_secret",
+    "CHANGEME_openssl_rand_base64_32",
+    "CHANGEME_openssl_rand_base64_48",
+    "CHANGE_ME_IN_PRODUCTION",
+    "CHANGE_ME_USE_STRONG_RANDOM_KEY_IN_PRODUCTION",
+}
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -90,12 +100,43 @@ class Settings(BaseSettings):
     DEFAULT_VAT_AMOUNT_CONFIDENCE: float = 0.90
     DEFAULT_LINE_ITEM_CONFIDENCE: float = 0.80
     CRITICAL_FIELD_THRESHOLD: float = 0.50
+    DEFAULT_CLASSIFICATION_CONFIDENCE: float = 0.35
+
+    # Multi-tenant quotas / metering
+    DEFAULT_MAX_CONCURRENT_DOCS: int = 10   # max in-flight per tenant
+    REVIEW_QUEUE_STALE_HOURS: int = 24      # hours before a review is escalated
+
+    # Feature flags — set to False to disable a pipeline stage and route to MANUAL_REVIEW
+    # Useful for canary rollout and zero-downtime rollback.
+    ENABLE_OCR_PIPELINE: bool = True
+    ENABLE_LLM_STRUCTURING: bool = True
+    ENABLE_RECONCILIATION: bool = True
 
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: list[str] = ["*"]
     CORS_ALLOW_HEADERS: list[str] = ["*"]
+
+    def validate_production_secrets(self) -> None:
+        """Fail fast if insecure default secrets are used in production."""
+        if self.ENVIRONMENT != "production":
+            return
+        insecure: list[str] = []
+        for field in ("SECRET_KEY", "MINIO_SECRET_KEY"):
+            val = getattr(self, field, "")
+            if val in _INSECURE_DEFAULTS:
+                insecure.append(field)
+        # Check password-like strings in DATABASE_URL / RABBITMQ_URL
+        for url_field in ("DATABASE_URL", "RABBITMQ_URL"):
+            val = getattr(self, url_field, "")
+            if "ocr_saas_secret" in val or "CHANGEME" in val:
+                insecure.append(url_field)
+        if insecure:
+            raise RuntimeError(
+                f"Production startup blocked: insecure default secrets detected in "
+                f"{insecure}. Set strong secrets via environment variables or K8s Secrets."
+            )
 
 
 @lru_cache()

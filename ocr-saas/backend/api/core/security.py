@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
+from collections.abc import Callable
+
 from fastapi import Depends, Header, HTTPException, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -14,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
 from api.core.database import get_db
-from api.models.db import Tenant
+from api.models.db import APIKey, Tenant
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -102,13 +104,28 @@ def verify_api_key(plain_key: str, hashed_key: str) -> bool:
     return hash_api_key(plain_key) == hashed_key
 
 
-async def get_current_tenant(
-    authorization: str | None = Header(None),
-    api_key: str | None = Header(None, alias="X-API-Key"),
-    db: AsyncSession = Depends(get_db),
-) -> uuid.UUID:
-    """Get the current tenant from the JWT token or API key."""
-    tenant_id = None
+async def _resolve_auth(
+    authorization: str | None,
+    api_key_header: str | None,
+    db: AsyncSession,
+) -> tuple[uuid.UUID, str]:
+    """Resolve auth credentials → (tenant_id, role).
+
+    JWT tokens (tenant owner login) are always "admin" role.
+    API keys carry their stored role ("admin" | "reviewer" | "readonly").
+    """
+    if api_key_header:
+        key_hash = hash_api_key(api_key_header)
+        result = await db.execute(
+            select(APIKey)
+            .join(APIKey.tenant)
+            .where(APIKey.key_hash == key_hash)
+            .where(APIKey.is_active.is_(True))
+            .where(Tenant.is_active.is_(True))
+        )
+        api_key_obj = result.scalar_one_or_none()
+        if api_key_obj:
+            return api_key_obj.tenant_id, api_key_obj.role
 
     if authorization:
         try:
@@ -116,42 +133,62 @@ async def get_current_tenant(
             if scheme.lower() == "bearer":
                 payload = decode_token(token)
                 if payload:
-                    tenant_id = payload.get("sub")
-        except (ValueError, HTTPException):
+                    tenant_id_str = payload.get("sub")
+                    if tenant_id_str:
+                        result = await db.execute(
+                            select(Tenant).where(Tenant.id == uuid.UUID(tenant_id_str))
+                        )
+                        tenant = result.scalar_one_or_none()
+                        if tenant and tenant.is_active:
+                            return tenant.id, "admin"
+        except (ValueError, AttributeError):
             pass
 
-    if api_key:
-        key_hash = hash_api_key(api_key)
-        result = await db.execute(
-            select(Tenant)
-            .join(Tenant.api_keys)
-            .where(api_key == key_hash)
-            .where(Tenant.is_active == True)  # noqa: E712
-        )
-        tenant = result.scalar_one_or_none()
-        if tenant:
-            return tenant.id
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
-    if not tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
 
-    try:
-        result = await db.execute(
-            select(Tenant).where(Tenant.id == uuid.UUID(tenant_id))
-        )
-        tenant = result.scalar_one_or_none()
-        if not tenant or not tenant.is_active:
+async def get_current_tenant(
+    authorization: str | None = Header(None),
+    api_key: str | None = Header(None, alias="X-API-Key"),
+    db: AsyncSession = Depends(get_db),
+) -> uuid.UUID:
+    """Get the current tenant from the JWT token or API key."""
+    tenant_id, _ = await _resolve_auth(authorization, api_key, db)
+    return tenant_id
+
+
+async def get_current_tenant_and_role(
+    authorization: str | None = Header(None),
+    api_key: str | None = Header(None, alias="X-API-Key"),
+    db: AsyncSession = Depends(get_db),
+) -> tuple[uuid.UUID, str]:
+    """Get (tenant_id, role) from JWT or API key."""
+    return await _resolve_auth(authorization, api_key, db)
+
+
+def require_role(*allowed_roles: str) -> Callable:
+    """Dependency factory: allows access only to the specified roles.
+
+    Usage:
+        @router.delete("/{id}")
+        async def delete_doc(
+            tenant_id: uuid.UUID = Depends(require_role("admin")),
+        ): ...
+    """
+    async def _check(
+        authorization: str | None = Header(None),
+        api_key: str | None = Header(None, alias="X-API-Key"),
+        db: AsyncSession = Depends(get_db),
+    ) -> uuid.UUID:
+        tenant_id, role = await _resolve_auth(authorization, api_key, db)
+        if role not in allowed_roles:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Tenant not found or inactive",
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Role '{role}' is not allowed. Required: {list(allowed_roles)}",
             )
-        return uuid.UUID(tenant_id)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
+        return tenant_id
+    return Depends(_check)

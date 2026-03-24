@@ -17,13 +17,15 @@ from fastapi import (
 )
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, flag_modified
 
+from api.core.audit import write_audit
 from api.core.config import settings
 from api.core.database import get_db
-from api.core.security import get_current_tenant
+from api.core.security import get_current_tenant, require_role
 from api.core.storage import get_minio_client, get_presigned_url
 from api.models.db import (
+    AuditLog,
     Decision,
     Document,
     DocumentFile,
@@ -34,11 +36,14 @@ from api.models.db import (
     Tenant,
 )
 from api.routes.schemas import (
+    AuditLogEntry,
     DocumentCreate,
     DocumentListResponse,
     DocumentResponse,
     DocumentStatusResponse,
     DocumentTypeEnum,
+    FieldCorrectionRequest,
+    FieldCorrectionResponse,
     StatusEnum,
     UpdateDocumentRequest,
 )
@@ -46,12 +51,93 @@ from api.routes.schemas import (
 router = APIRouter()
 
 
+@router.get("/stats")
+async def get_document_stats(
+    db: AsyncSession = Depends(get_db),
+    tenant_id: uuid.UUID = Depends(get_current_tenant),
+) -> dict:
+    """Return document processing statistics and quota usage for the current tenant."""
+    from datetime import datetime as dt
+
+    now = dt.utcnow()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # Total documents this month
+    monthly_result = await db.execute(
+        select(func.count()).select_from(Document).where(
+            Document.tenant_id == tenant_id,
+            Document.created_at >= month_start,
+        )
+    )
+    monthly_count = monthly_result.scalar() or 0
+
+    # Per-status breakdown
+    status_rows = await db.execute(
+        select(Document.status, func.count().label("cnt"))
+        .where(Document.tenant_id == tenant_id)
+        .group_by(Document.status)
+    )
+    by_status = {row.status.value: row.cnt for row in status_rows}
+
+    # Per-decision breakdown
+    decision_rows = await db.execute(
+        select(Document.decision, func.count().label("cnt"))
+        .where(Document.tenant_id == tenant_id, Document.decision.is_not(None))
+        .group_by(Document.decision)
+    )
+    by_decision = {row.decision.value: row.cnt for row in decision_rows}
+
+    # In-flight count
+    _in_flight = [
+        DocumentStatus.PENDING, DocumentStatus.PREPROCESSING, DocumentStatus.OCR,
+        DocumentStatus.CLASSIFIED, DocumentStatus.STRUCTURING,
+        DocumentStatus.RECONCILIATION, DocumentStatus.VALIDATING,
+    ]
+    in_flight_result = await db.execute(
+        select(func.count()).select_from(Document).where(
+            Document.tenant_id == tenant_id,
+            Document.status.in_(_in_flight),
+        )
+    )
+    in_flight = in_flight_result.scalar() or 0
+
+    # Pending review
+    review_result = await db.execute(
+        select(func.count()).select_from(Document).where(
+            Document.tenant_id == tenant_id,
+            Document.status.in_([DocumentStatus.REVIEW, DocumentStatus.MANUAL_REVIEW]),
+        )
+    )
+    pending_review = review_result.scalar() or 0
+
+    # Tenant quota info
+    tenant_result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    tenant = tenant_result.scalar_one_or_none()
+    tenant_settings = (tenant.settings or {}) if tenant else {}
+
+    return {
+        "tenant_id": tenant_id,
+        "period": {
+            "month_start": month_start.isoformat(),
+            "documents_this_month": monthly_count,
+            "monthly_limit": tenant_settings.get("max_documents_per_month"),
+        },
+        "in_flight": in_flight,
+        "concurrent_limit": tenant_settings.get(
+            "max_concurrent_processing", settings.DEFAULT_MAX_CONCURRENT_DOCS
+        ),
+        "pending_review": pending_review,
+        "by_status": by_status,
+        "by_decision": by_decision,
+    }
+
+
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    tenant_id: uuid.UUID = Depends(get_current_tenant),
+    tenant_id: uuid.UUID = require_role("admin", "reviewer"),
 ) -> DocumentResponse:
     """Upload a document for processing."""
     if file.size and file.size > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
@@ -64,6 +150,48 @@ async def upload_document(
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=f"File type not supported: {file.content_type}",
+        )
+
+    # Fetch tenant once — reused for quota, concurrency, and priority checks
+    tenant_for_quota = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    tenant_quota = tenant_for_quota.scalar_one_or_none()
+    tenant_settings = (tenant_quota.settings or {}) if tenant_quota else {}
+
+    # Gap2: Per-tenant monthly document quota check
+    monthly_limit = tenant_settings.get("max_documents_per_month")
+    if monthly_limit:
+        month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        count_result = await db.execute(
+            select(func.count()).select_from(Document).where(
+                Document.tenant_id == tenant_id,
+                Document.created_at >= month_start,
+            )
+        )
+        if (count_result.scalar() or 0) >= monthly_limit:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Monthly document limit reached",
+            )
+
+    # Per-tenant concurrent processing limit (documents currently in-flight)
+    max_concurrent = tenant_settings.get(
+        "max_concurrent_processing", settings.DEFAULT_MAX_CONCURRENT_DOCS
+    )
+    _in_flight_statuses = [
+        DocumentStatus.PENDING, DocumentStatus.PREPROCESSING, DocumentStatus.OCR,
+        DocumentStatus.CLASSIFIED, DocumentStatus.STRUCTURING,
+        DocumentStatus.RECONCILIATION, DocumentStatus.VALIDATING,
+    ]
+    in_flight_result = await db.execute(
+        select(func.count()).select_from(Document).where(
+            Document.tenant_id == tenant_id,
+            Document.status.in_(_in_flight_statuses),
+        )
+    )
+    if (in_flight_result.scalar() or 0) >= max_concurrent:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Concurrent processing limit reached — retry after current documents finish",
         )
 
     document_id = uuid.uuid4()
@@ -102,15 +230,19 @@ async def upload_document(
     )
     db.add(doc_file)
 
+    await write_audit(
+        db, tenant_id, "document.uploaded",
+        document_id=document_id,
+        actor=f"api:{tenant_id}",
+        payload={"filename": original_filename, "file_size": len(file_content)},
+    )
     await db.commit()
     await db.refresh(document)
 
     # Feature 5: determine priority based on tenant plan
-    tenant_result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
-    tenant = tenant_result.scalar_one_or_none()
     priority = (
         settings.ENTERPRISE_TASK_PRIORITY
-        if (tenant and (tenant.settings or {}).get("plan") == "enterprise")
+        if tenant_settings.get("plan") == "enterprise"
         else settings.STANDARD_TASK_PRIORITY
     )
 
@@ -336,7 +468,7 @@ async def update_document(
     document_id: uuid.UUID,
     update_data: UpdateDocumentRequest,
     db: AsyncSession = Depends(get_db),
-    tenant_id: uuid.UUID = Depends(get_current_tenant),
+    tenant_id: uuid.UUID = require_role("admin", "reviewer"),
 ) -> DocumentResponse:
     """Update a document (e.g., manual corrections during review)."""
     query = select(Document).where(
@@ -357,7 +489,20 @@ async def update_document(
         )
 
     if update_data.decision is not None:
-        document.decision = Decision(update_data.decision.value)
+        new_decision = Decision(update_data.decision)
+        document.decision = new_decision
+        # Approve (AUTO) → mark COMPLETED; Reject (MANUAL) → leave in MANUAL_REVIEW
+        if new_decision == Decision.AUTO and document.status in (
+            DocumentStatus.REVIEW, DocumentStatus.MANUAL_REVIEW
+        ):
+            document.status = DocumentStatus.COMPLETED
+            document.processing_completed_at = datetime.utcnow()
+        await write_audit(
+            db, tenant_id, "document.decision_override",
+            document_id=document_id,
+            actor=f"api:{tenant_id}",
+            payload={"decision": update_data.decision, "new_status": document.status.value},
+        )
 
     if update_data.document_type is not None:
         document.document_type = DocumentType(update_data.document_type.value)
@@ -384,6 +529,91 @@ async def update_document(
         created_at=document.created_at,
         updated_at=document.updated_at,
     )
+
+
+@router.patch("/{document_id}/fields", response_model=FieldCorrectionResponse)
+async def update_document_fields(
+    document_id: uuid.UUID,
+    data: FieldCorrectionRequest,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: uuid.UUID = Depends(get_current_tenant),
+) -> FieldCorrectionResponse:
+    """Apply field-level corrections to extracted data."""
+    import copy
+
+    query = select(Document).where(
+        Document.id == document_id,
+        Document.tenant_id == tenant_id,
+    ).options(selectinload(Document.structured_result))
+
+    result = await db.execute(query)
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    structured_result = document.structured_result
+    if not structured_result:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No structured result found for this document",
+        )
+
+    extracted = copy.deepcopy(structured_result.extracted_data or {})
+    confs = dict(structured_result.field_confidences or {})
+
+    for field_path, value in data.fields.items():
+        parts = field_path.split(".")
+        target = extracted
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        target[parts[-1]] = value
+        confs[field_path] = 1.0
+
+    structured_result.extracted_data = extracted
+    structured_result.field_confidences = confs
+    flag_modified(structured_result, "extracted_data")
+    flag_modified(structured_result, "field_confidences")
+
+    await write_audit(
+        db, tenant_id, "document.field_corrected",
+        document_id=document_id,
+        actor=f"api:{tenant_id}",
+        payload={"fields": list(data.fields.keys())},
+    )
+    await db.commit()
+
+    return FieldCorrectionResponse(
+        document_id=document_id,
+        updated_fields=list(data.fields.keys()),
+        structured_result_id=structured_result.id,
+    )
+
+
+@router.get("/{document_id}/audit", response_model=list[AuditLogEntry])
+async def get_document_audit(
+    document_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: uuid.UUID = Depends(get_current_tenant),
+) -> list[AuditLogEntry]:
+    """Get the audit trail for a document."""
+    doc_query = select(Document).where(
+        Document.id == document_id,
+        Document.tenant_id == tenant_id,
+    )
+    doc_result = await db.execute(doc_query)
+    if not doc_result.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    audit_query = (
+        select(AuditLog)
+        .where(AuditLog.document_id == document_id)
+        .order_by(AuditLog.created_at)
+    )
+    result = await db.execute(audit_query)
+    entries = result.scalars().all()
+
+    return [AuditLogEntry.model_validate(e) for e in entries]
 
 
 @router.get("/{document_id}/pages/{page}/image")
@@ -425,7 +655,7 @@ async def get_document_page_image(
 async def delete_document(
     document_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    tenant_id: uuid.UUID = Depends(get_current_tenant),
+    tenant_id: uuid.UUID = require_role("admin"),
 ) -> None:
     """Delete a document and its associated files."""
     query = select(Document).where(

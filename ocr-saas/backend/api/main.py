@@ -1,14 +1,17 @@
 """OCR SaaS API - FastAPI Main Application."""
 
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from api.core.config import settings
 from api.core.database import close_db, init_db
+from api.core.metrics import app_info, http_request_duration_seconds
 from api.core.redis import close_redis, get_redis
 from api.core.storage import ensure_buckets
 from api.routes import auth, documents, health, suppliers, webhooks
@@ -18,7 +21,16 @@ from api.routes import auth, documents, health, suppliers, webhooks
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan events."""
     # Startup
-    await init_db()
+    # Fail fast if production secrets are defaults
+    settings.validate_production_secrets()
+    app_info.info({"version": settings.APP_VERSION, "environment": settings.ENVIRONMENT})
+
+    # create_all() is only safe in development/staging.
+    # In production, run: alembic upgrade head
+    if settings.ENVIRONMENT in ("development", "staging"):
+        await init_db()
+    # Else: rely on Alembic migrations applied before deploy
+
     await get_redis()  # Initialize Redis connection
     await ensure_buckets()  # Ensure MinIO buckets exist
 
@@ -70,6 +82,30 @@ app.include_router(
 )
 app.include_router(webhooks.router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 app.include_router(suppliers.router, prefix="/api/v1/suppliers", tags=["Suppliers"])
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    # Normalise path: strip UUIDs to avoid high cardinality
+    path = request.url.path
+    for segment in path.split("/"):
+        if len(segment) == 36 and segment.count("-") == 4:
+            path = path.replace(segment, "{id}")
+    http_request_duration_seconds.labels(
+        method=request.method,
+        path=path,
+        status_code=str(response.status_code),
+    ).observe(duration)
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    """Prometheus metrics endpoint."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/")

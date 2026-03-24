@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
@@ -19,6 +20,35 @@ from api.models.db import (
     StructuredResult,
 )
 from workers.celery_app import celery_app
+
+
+def write_audit_event(
+    tenant_id: str,
+    event: str,
+    document_id: str | None = None,
+    actor: str = "system",
+    payload: dict | None = None,
+) -> None:
+    """Write audit event from async worker context."""
+    import asyncio
+
+    async def _write():
+        from api.core.audit import write_audit
+        session = await get_db_session()
+        try:
+            await write_audit(
+                session,
+                uuid.UUID(tenant_id),
+                event,
+                document_id=uuid.UUID(document_id) if document_id else None,
+                actor=actor,
+                payload=payload,
+            )
+            await session.commit()
+        finally:
+            await session.close()
+
+    asyncio.run(_write())
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +123,46 @@ def _get_extracted_totals(extracted_data: dict[str, Any]) -> tuple[Decimal | Non
         totals.get("grand_total") or extracted_data.get("grand_total") or extracted_data.get("total_amount")
     )
     return extracted_subtotal, extracted_vat, extracted_total
+
+
+def reconcile_delivery_note(extracted_data: dict[str, Any]) -> dict[str, Any]:
+    """Reconcile delivery note — validates item completeness only.
+
+    Delivery notes don't carry financial totals, so amount reconciliation is
+    skipped. Status is 'pass' when all items have description + quantity.
+    """
+    line_items = extracted_data.get("line_items", [])
+    items_count = len(line_items)
+
+    incomplete_indices = [
+        i for i, item in enumerate(line_items)
+        if not item.get("description") or item.get("quantity") is None
+    ]
+
+    status = "pass" if not incomplete_indices else "warn"
+    discrepancy_details: dict[str, Any] = {}
+    if incomplete_indices:
+        discrepancy_details["incomplete_items"] = {
+            "indices": incomplete_indices,
+            "count": len(incomplete_indices),
+            "message": "Items missing description or quantity",
+        }
+
+    return {
+        "status": status,
+        "line_items_count": items_count,
+        "reconciled_items": line_items,
+        "extracted_subtotal": None,
+        "calculated_subtotal": 0.0,
+        "subtotal_match": None,
+        "extracted_vat": None,
+        "calculated_vat": 0.0,
+        "vat_match": None,
+        "extracted_total": None,
+        "calculated_total": 0.0,
+        "total_match": None,
+        "discrepancy_details": discrepancy_details,
+    }
 
 
 def reconcile_line_items(
@@ -296,29 +366,39 @@ async def save_reconciliation_log(
     reconciliation: dict[str, Any],
     processing_time_ms: int,
 ) -> str:
-    """Save reconciliation log to database."""
+    """Save reconciliation log to database (upsert — idempotent per document)."""
     session = await get_db_session()
     try:
-        log = ReconciliationLog(
-            id=uuid.uuid4(),
-            document_id=uuid.UUID(document_id),
-            line_items_count=reconciliation["line_items_count"],
-            extracted_subtotal=reconciliation.get("extracted_subtotal"),
-            calculated_subtotal=reconciliation.get("calculated_subtotal"),
-            extracted_vat=reconciliation.get("extracted_vat"),
-            calculated_vat=reconciliation.get("calculated_vat"),
-            extracted_total=reconciliation.get("extracted_total"),
-            calculated_total=reconciliation.get("calculated_total"),
-            subtotal_match=reconciliation.get("subtotal_match"),
-            vat_match=reconciliation.get("vat_match"),
-            total_match=reconciliation.get("total_match"),
-            reconciliation_status=reconciliation["status"],
-            discrepancy_details=reconciliation.get("discrepancy_details"),
-            processing_time_ms=processing_time_ms,
+        values = {
+            "id": uuid.uuid4(),
+            "document_id": uuid.UUID(document_id),
+            "line_items_count": reconciliation["line_items_count"],
+            "extracted_subtotal": reconciliation.get("extracted_subtotal"),
+            "calculated_subtotal": reconciliation.get("calculated_subtotal"),
+            "extracted_vat": reconciliation.get("extracted_vat"),
+            "calculated_vat": reconciliation.get("calculated_vat"),
+            "extracted_total": reconciliation.get("extracted_total"),
+            "calculated_total": reconciliation.get("calculated_total"),
+            "subtotal_match": reconciliation.get("subtotal_match"),
+            "vat_match": reconciliation.get("vat_match"),
+            "total_match": reconciliation.get("total_match"),
+            "reconciliation_status": reconciliation["status"],
+            "discrepancy_details": reconciliation.get("discrepancy_details"),
+            "processing_time_ms": processing_time_ms,
+        }
+        update_set = {k: v for k, v in values.items() if k not in ("id", "document_id")}
+        stmt = (
+            pg_insert(ReconciliationLog)
+            .values(**values)
+            .on_conflict_do_update(
+                constraint="uq_reconciliation_logs_document",
+                set_=update_set,
+            )
+            .returning(ReconciliationLog.id)
         )
-        session.add(log)
+        result = await session.execute(stmt)
         await session.commit()
-        return str(log.id)
+        return str(result.scalar_one())
     finally:
         await session.close()
 
@@ -337,6 +417,12 @@ def reconcile_document(self, document_id: str, tenant_id: str, priority: int = 5
     """
     start_time = time.time()
     logger.info(f"Starting reconciliation for document {document_id}")
+
+    # Feature flag gate — canary/rollback support
+    if not settings.ENABLE_RECONCILIATION:
+        logger.warning(f"Reconciliation disabled (feature flag). Routing document {document_id} to MANUAL_REVIEW.")
+        update_document_status(document_id, DocumentStatus.MANUAL_REVIEW, error_message="reconciliation_disabled")
+        return {"document_id": document_id, "status": "manual_review", "reason": "reconciliation_disabled"}
 
     try:
         update_document_status(document_id, DocumentStatus.RECONCILIATION)
@@ -370,7 +456,11 @@ def reconcile_document(self, document_id: str, tenant_id: str, priority: int = 5
                 "reason": "No structured data or line items",
             }
 
-        reconciliation = reconcile_line_items(structured.extracted_data)
+        # delivery_note has no financial totals — skip amount reconciliation
+        if structured.document_type == DocumentType.DELIVERY_NOTE:
+            reconciliation = reconcile_delivery_note(structured.extracted_data)
+        else:
+            reconciliation = reconcile_line_items(structured.extracted_data)
 
         processing_time_ms = int((time.time() - start_time) * 1000)
 
@@ -388,6 +478,16 @@ def reconcile_document(self, document_id: str, tenant_id: str, priority: int = 5
         )
 
         processing_time = time.time() - start_time
+        write_audit_event(
+            tenant_id, "pipeline.reconciliation.completed", document_id,
+            actor="worker:reconciliation",
+            payload={
+                "status": reconciliation["status"],
+                "line_items_count": reconciliation["line_items_count"],
+                "total_match": reconciliation.get("total_match"),
+                "processing_time_s": round(processing_time, 2),
+            },
+        )
 
         logger.info(
             f"Reconciliation completed for document {document_id}: "

@@ -32,6 +32,74 @@ logger = logging.getLogger(__name__)
 # Schema cache
 SCHEMA_CACHE: dict[str, dict[str, Any]] = {}
 
+# ---------------------------------------------------------------------------
+# Confidence resolution helpers
+# ---------------------------------------------------------------------------
+
+# Maps canonical threshold key → ordered list of LLM-output key candidates.
+# The first matching key wins. Handles flat, nested-dot, and parent-object forms
+# that different LLM outputs may use.
+_CONFIDENCE_CANDIDATES: dict[str, list[str]] = {
+    "invoice_number": ["invoice_number"],
+    "invoice_date": ["invoice_date"],
+    "issue_date": ["issue_date"],
+    "supplier_name": ["supplier_name", "supplier.name", "supplier"],
+    "supplier_pib": ["supplier_pib", "supplier.pib"],
+    "total_amount": ["total_amount", "totals.grand_total", "grand_total", "totals"],
+    "grand_total": ["grand_total", "totals.grand_total", "total_amount", "totals"],
+    "vat_amount": ["vat_amount", "totals.vat_amount", "totals.vat_total", "vat_total"],
+    "vat_total": ["vat_total", "totals.vat_total", "totals.vat_amount", "vat_amount"],
+}
+
+# Critical fields that trigger MANUAL decision if confidence < CRITICAL_FIELD_THRESHOLD
+_CRITICAL_FIELD_CANDIDATES: dict[str, list[str]] = {
+    "grand_total": ["grand_total", "totals.grand_total", "total_amount", "totals"],
+    "invoice_number": ["invoice_number"],
+    "invoice_date": ["invoice_date"],
+    "issue_date": ["issue_date"],
+    "supplier_name": ["supplier_name", "supplier.name", "supplier"],
+}
+
+
+def _resolve_confidence(
+    confidences: dict[str, float],
+    *candidate_keys: str,
+) -> float | None:
+    """Return the first matching confidence value from a list of candidate keys."""
+    for key in candidate_keys:
+        if key in confidences:
+            return confidences[key]
+    return None
+
+
+def write_audit_event(
+    tenant_id: str,
+    event: str,
+    document_id: str | None = None,
+    actor: str = "system",
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Write audit event from sync worker context."""
+    import asyncio
+
+    async def _write():
+        from api.core.audit import write_audit
+        session = await get_db_session()
+        try:
+            await write_audit(
+                session,
+                uuid.UUID(tenant_id),
+                event,
+                document_id=uuid.UUID(document_id) if document_id else None,
+                actor=actor,
+                payload=payload,
+            )
+            await session.commit()
+        finally:
+            await session.close()
+
+    asyncio.run(_write())
+
 
 # get_db_session imported from api.core.database
 
@@ -129,7 +197,7 @@ def validate_business_rules(
                 "message": f"PIB must be 9 or 10 digits, got: {pib}",
             })
 
-    date_fields = ["date", "invoice_date", "issue_date", "due_date"]
+    date_fields = ["invoice_date", "issue_date", "due_date", "valid_until"]
     import re
     date_pattern = re.compile(r"^\d{2}[./]\d{2}[./]\d{4}$|^\d{4}-\d{2}-\d{2}$")
 
@@ -142,11 +210,16 @@ def validate_business_rules(
                     "message": f"{field} must be in DD.MM.YYYY or ISO format, got: {value}",
                 })
 
-    amount_fields = ["total_amount", "subtotal", "vat_amount"]
-    for field in amount_fields:
-        if field in data:
+    totals = data.get("totals", {}) or {}
+    amount_sources = {
+        "grand_total": totals.get("grand_total") or data.get("grand_total") or data.get("total_amount"),
+        "subtotal": totals.get("subtotal") or data.get("subtotal"),
+        "vat_total": totals.get("vat_total") or data.get("vat_amount"),
+    }
+    for field, value in amount_sources.items():
+        if value is not None:
             try:
-                amount = float(str(data[field]).replace(",", ""))
+                amount = float(str(value).replace(",", ""))
                 if amount < 0:
                     violations.append({
                         "rule": "negative_amount",
@@ -155,14 +228,14 @@ def validate_business_rules(
             except ValueError:
                 violations.append({
                     "rule": "invalid_amount",
-                    "message": f"{field} is not a valid number: {data[field]}",
+                    "message": f"{field} is not a valid number: {value}",
                 })
 
     required_fields = {
-        DocumentType.INVOICE: ["invoice_number", "date", "total_amount"],
-        DocumentType.PROFORMA: ["quote_number", "date"],
-        DocumentType.DELIVERY_NOTE: ["delivery_note_number", "date"],
-        DocumentType.CONTRACT: ["contract_number", "date"],
+        DocumentType.INVOICE: ["invoice_number", "invoice_date", "totals"],
+        DocumentType.PROFORMA: ["proforma_number", "issue_date"],
+        DocumentType.DELIVERY_NOTE: ["delivery_note_number", "issue_date"],
+        DocumentType.CONTRACT: ["contract_number", "issue_date"],
     }
 
     if document_type in required_fields:
@@ -181,10 +254,13 @@ def get_tenant_confidence_thresholds(tenant: Tenant | None) -> dict[str, float]:
     defaults = {
         "invoice_number": settings.DEFAULT_INVOICE_NUMBER_CONFIDENCE,
         "invoice_date": settings.DEFAULT_INVOICE_DATE_CONFIDENCE,
+        "issue_date": settings.DEFAULT_INVOICE_DATE_CONFIDENCE,
         "supplier_name": settings.DEFAULT_SUPPLIER_CONFIDENCE,
         "supplier_pib": settings.DEFAULT_SUPPLIER_CONFIDENCE,
         "total_amount": settings.DEFAULT_TOTAL_AMOUNT_CONFIDENCE,
+        "grand_total": settings.DEFAULT_TOTAL_AMOUNT_CONFIDENCE,
         "vat_amount": settings.DEFAULT_VAT_AMOUNT_CONFIDENCE,
+        "vat_total": settings.DEFAULT_VAT_AMOUNT_CONFIDENCE,
     }
     if tenant and tenant.settings and "confidence_thresholds" in tenant.settings:
         defaults.update(tenant.settings["confidence_thresholds"])
@@ -334,11 +410,13 @@ def determine_decision(
     if supplier_pib and supplier_match is None:
         return Decision.REVIEW, "supplier_not_found"
 
-    # Check for critical fields below absolute manual threshold (0.5)
+    # Check for critical fields below absolute manual threshold — use canonical
+    # resolution so that nested LLM keys like "totals.grand_total" are matched.
     critical_low = [
-        (field, confidences[field])
-        for field in ["total_amount", "invoice_number", "date", "supplier_name"]
-        if field in confidences and confidences[field] < settings.CRITICAL_FIELD_THRESHOLD
+        (canonical, conf)
+        for canonical, candidates in _CRITICAL_FIELD_CANDIDATES.items()
+        if (conf := _resolve_confidence(confidences, *candidates)) is not None
+        and conf < settings.CRITICAL_FIELD_THRESHOLD
     ]
     if critical_low:
         return Decision.MANUAL, f"Critical fields below threshold: {critical_low}"
@@ -347,9 +425,13 @@ def determine_decision(
         return Decision.MANUAL, "Reconciliation failed: math mismatch"
 
     fields_below_threshold = [
-        (field, confidences[field], thresholds[field])
+        (field, conf, min_conf)
         for field, min_conf in thresholds.items()
-        if field in confidences and confidences[field] < min_conf
+        if (conf := _resolve_confidence(
+            confidences,
+            *_CONFIDENCE_CANDIDATES.get(field, [field]),
+        )) is not None
+        and conf < min_conf
     ]
     if fields_below_threshold:
         return Decision.REVIEW, f"Fields below auto threshold: {fields_below_threshold}"
@@ -362,6 +444,16 @@ def determine_decision(
 
     if not schema_valid:
         return Decision.REVIEW, "Schema validation failed"
+
+    # Check aggregate line-item confidence if present
+    line_item_confs = [
+        v for k, v in confidences.items()
+        if k.startswith("line_items") or k == "items"
+    ]
+    if line_item_confs:
+        avg_li_conf = sum(line_item_confs) / len(line_item_confs)
+        if avg_li_conf < settings.DEFAULT_LINE_ITEM_CONFIDENCE:
+            return Decision.REVIEW, f"Low avg line-item confidence: {avg_li_conf:.2f}"
 
     return Decision.AUTO, "All validations passed"
 
@@ -503,6 +595,28 @@ def validate_document(self, document_id: str, tenant_id: str, priority: int = 5)
             decision=decision,
             processing_completed_at=True,
         )
+
+        write_audit_event(
+            tenant_id,
+            "validation.decision",
+            document_id=document_id,
+            actor="worker:validation",
+            payload={
+                "decision": decision.value,
+                "reasoning": reasoning,
+                "overall_confidence": overall_confidence,
+                "schema_valid": schema_valid,
+                "is_duplicate": is_duplicate,
+            },
+        )
+
+        # Dispatch to review queue so the review worker can send notifications/webhooks
+        if decision in (Decision.REVIEW, Decision.MANUAL):
+            from workers.review.tasks import handle_review
+            handle_review.apply_async(
+                args=[document_id, tenant_id, decision.value],
+                priority=priority,
+            )
 
         processing_time = time.time() - start_time
 

@@ -1,0 +1,102 @@
+# NetworkPolicy — OCR SaaS inference cluster isolation
+#
+# Goals:
+#   1. Deny all ingress/egress by default for inference pods (vllm, vllm-structuring)
+#   2. Allow ingress to inference pods only from within the cluster (workers)
+#   3. Deny all public egress from inference pods (model weights must be pre-loaded)
+#   4. Allow workers + API unrestricted egress (they need MinIO, RabbitMQ, Redis, DB)
+#   5. Allow monitoring (Prometheus scrape) from within the cluster
+---
+# Default deny-all for inference pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inference-deny-public-egress
+  namespace: ocr-saas
+spec:
+  podSelector:
+    matchLabels:
+      role: inference
+  policyTypes:
+    - Egress
+    - Ingress
+  ingress:
+    # Allow ingress from any pod within the same namespace (workers calling vLLM)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ocr-saas
+  egress:
+    # Allow DNS resolution (CoreDNS on port 53)
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow communication within the cluster only (no public internet)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ocr-saas
+---
+# Default deny-all baseline for the whole namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: ocr-saas
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# Allow API pod ingress from everywhere (public-facing)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-ingress
+  namespace: ocr-saas
+spec:
+  podSelector:
+    matchLabels:
+      app: ocr-saas-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - {}
+---
+# Allow frontend ingress from everywhere
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-ingress
+  namespace: ocr-saas
+spec:
+  podSelector:
+    matchLabels:
+      app: ocr-saas-frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - {}
+---
+# Allow Prometheus to scrape all pods in the namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: ocr-saas
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: 8000
+        - port: 8001
+        - port: 9000
+        - port: 9090

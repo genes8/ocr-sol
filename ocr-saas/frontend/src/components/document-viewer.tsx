@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { BoundingBox, TextBlock } from "../services/api";
 
 interface DocumentViewerProps {
   imageUrl?: string;
   textBlocks?: TextBlock[];
-  selectedField?: string;
+  /** Direct bbox from bbox_evidence — used for highlight instead of text matching */
+  selectedBbox?: BoundingBox;
   onFieldSelect?: (fieldKey: string, bbox?: BoundingBox) => void;
   zoom?: number;
   panOffset?: { x: number; y: number };
@@ -15,7 +16,7 @@ interface DocumentViewerProps {
 export function DocumentViewer({
   imageUrl,
   textBlocks = [],
-  selectedField,
+  selectedBbox,
   onFieldSelect,
   zoom = 1,
   panOffset = { x: 0, y: 0 },
@@ -65,20 +66,16 @@ export function DocumentViewer({
     setIsPanning(false);
   }, []);
 
-  // Highlight matching text block
-  const getHighlightedBlocks = () => {
-    if (!selectedField) return [];
-
-    return textBlocks.filter((block) => {
-      if (!block.bbox || !block.text) return false;
-      // Simple text matching
-      const textLower = block.text.toLowerCase();
-      const fieldLower = selectedField.toLowerCase();
-      return textLower.includes(fieldLower) || fieldLower.includes(textLower);
-    });
+  // Match text block by exact bbox coordinates from bbox_evidence
+  const isBlockHighlighted = (block: TextBlock): boolean => {
+    if (!selectedBbox || !block.bbox) return false;
+    return (
+      block.bbox.x1 === selectedBbox.x1 &&
+      block.bbox.y1 === selectedBbox.y1 &&
+      block.bbox.x2 === selectedBbox.x2 &&
+      block.bbox.y2 === selectedBbox.y2
+    );
   };
-
-  const highlightedBlocks = getHighlightedBlocks();
 
   return (
     <div
@@ -166,29 +163,10 @@ export function DocumentViewer({
               className="absolute inset-0 w-full h-full pointer-events-none"
               style={{ overflow: "visible" }}
             >
-              {/* Highlighted blocks */}
-              {highlightedBlocks.map((block, idx) => {
-                if (!block.bbox) return null;
-                return (
-                  <g key={`highlight-${idx}`}>
-                    <rect
-                      x={block.bbox.x1}
-                      y={block.bbox.y1}
-                      width={block.bbox.x2 - block.bbox.x1}
-                      height={block.bbox.y2 - block.bbox.y1}
-                      fill="rgba(59, 130, 246, 0.2)"
-                      stroke="#3b82f6"
-                      strokeWidth="2"
-                      rx="2"
-                    />
-                  </g>
-                );
-              })}
-
-              {/* All blocks (dimmed) */}
+              {/* All blocks — highlighted by direct bbox match */}
               {textBlocks.map((block, idx) => {
                 if (!block.bbox) return null;
-                const isHighlighted = highlightedBlocks.includes(block);
+                const highlighted = isBlockHighlighted(block);
                 return (
                   <rect
                     key={`block-${idx}`}
@@ -196,10 +174,10 @@ export function DocumentViewer({
                     y={block.bbox.y1}
                     width={block.bbox.x2 - block.bbox.x1}
                     height={block.bbox.y2 - block.bbox.y1}
-                    fill={isHighlighted ? "rgba(59, 130, 246, 0.2)" : "rgba(107, 114, 128, 0.1)"}
-                    stroke={isHighlighted ? "#3b82f6" : "#9ca3af"}
-                    strokeWidth={isHighlighted ? "2" : "1"}
-                    strokeDasharray={isHighlighted ? "none" : "4 2"}
+                    fill={highlighted ? "rgba(59, 130, 246, 0.25)" : "rgba(107, 114, 128, 0.08)"}
+                    stroke={highlighted ? "#3b82f6" : "#9ca3af"}
+                    strokeWidth={highlighted ? "2" : "1"}
+                    strokeDasharray={highlighted ? "none" : "4 2"}
                     rx="2"
                     className="pointer-events-auto cursor-pointer transition-opacity hover:opacity-80"
                     onClick={() => {

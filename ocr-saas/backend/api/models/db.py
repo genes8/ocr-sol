@@ -116,6 +116,9 @@ class APIKey(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # RBAC role: "admin" | "reviewer" | "readonly"
+    # admin: full access; reviewer: review + field corrections; readonly: GET only
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="admin")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )
@@ -216,6 +219,7 @@ class OCRResult(Base):
     __tablename__ = "ocr_results"
     __table_args__ = (
         Index("idx_ocr_results_doc", "document_id"),
+        UniqueConstraint("document_id", name="uq_ocr_results_document"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -242,6 +246,7 @@ class StructuredResult(Base):
     __tablename__ = "structured_results"
     __table_args__ = (
         Index("idx_structured_results_doc", "document_id"),
+        UniqueConstraint("document_id", name="uq_structured_results_document"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -275,6 +280,7 @@ class ReconciliationLog(Base):
     __tablename__ = "reconciliation_logs"
     __table_args__ = (
         Index("idx_reconciliation_logs_doc", "document_id"),
+        UniqueConstraint("document_id", name="uq_reconciliation_logs_document"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -366,6 +372,27 @@ class Supplier(Base):
     )
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="suppliers")
+
+
+class AuditLog(Base):
+    """Audit trail for document processing events."""
+
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("idx_audit_logs_document", "document_id"),
+        Index("idx_audit_logs_tenant", "tenant_id"),
+        Index("idx_audit_logs_created", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    event: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
 
 
 class WebhookDelivery(Base):

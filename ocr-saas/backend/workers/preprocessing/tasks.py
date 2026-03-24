@@ -17,10 +17,40 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from api.core.config import settings
-from api.core.database import SyncSessionLocal
+from api.core.database import SyncSessionLocal, get_db_session
 from api.core.storage import get_minio_client, upload_thumbnail
 from api.models.db import Document, DocumentFile, DocumentStatus
 from workers.celery_app import celery_app
+
+
+def write_audit_event(
+    tenant_id: str,
+    event: str,
+    document_id: str | None = None,
+    actor: str = "system",
+    payload: dict | None = None,
+) -> None:
+    """Write audit event from sync worker context."""
+    import asyncio
+
+    async def _write():
+        from api.core.audit import write_audit
+        import uuid as _uuid
+        session = await get_db_session()
+        try:
+            await write_audit(
+                session,
+                _uuid.UUID(tenant_id),
+                event,
+                document_id=_uuid.UUID(document_id) if document_id else None,
+                actor=actor,
+                payload=payload,
+            )
+            await session.commit()
+        finally:
+            await session.close()
+
+    asyncio.run(_write())
 
 logger = logging.getLogger(__name__)
 
@@ -447,7 +477,13 @@ def process_document(self, document_id: str, tenant_id: str, priority: int = 5) 
             args=[document_id, tenant_id, priority],
             priority=priority,
         )
-        
+
+        write_audit_event(
+            tenant_id, "pipeline.preprocess.completed", document_id,
+            actor="worker:preprocessing",
+            payload={"pages": len(images), "processing_time_s": round(processing_time, 2)},
+        )
+
         return {
             "document_id": document_id,
             "status": "completed",

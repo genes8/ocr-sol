@@ -4,8 +4,11 @@ import os
 from celery import Celery
 from celery.signals import worker_ready, worker_shutdown
 from kombu import Exchange, Queue
+from prometheus_client import start_http_server
 
 from api.core.config import settings
+
+METRICS_PORT = int(os.environ.get("METRICS_PORT", "9090"))
 
 # Get worker type from environment
 WORKER_TYPE = os.environ.get("WORKER_TYPE", "general")
@@ -22,6 +25,7 @@ celery_app = Celery(
         "workers.structuring.tasks",
         "workers.reconciliation.tasks",
         "workers.validation.tasks",
+        "workers.review.tasks",
     ],
 )
 
@@ -55,6 +59,7 @@ celery_app.conf.update(
         "workers.structuring.tasks.*": {"queue": settings.STRUCTURING_QUEUE},
         "workers.reconciliation.tasks.*": {"queue": settings.RECONCILIATION_QUEUE},
         "workers.validation.tasks.*": {"queue": settings.VALIDATION_QUEUE},
+        "workers.review.tasks.*": {"queue": settings.REVIEW_QUEUE},
     },
 
     # Task execution
@@ -81,19 +86,30 @@ celery_app.conf.update(
         _make_queue(settings.STRUCTURING_QUEUE),
         _make_queue(settings.RECONCILIATION_QUEUE),
         _make_queue(settings.VALIDATION_QUEUE),
+        _make_queue(settings.REVIEW_QUEUE),
         _make_queue(settings.DEAD_LETTER_QUEUE, with_priority=False),
     ],
 
     # Monitoring
     worker_send_task_events=True,
     task_send_sent_event=True,
+
+    # Periodic tasks (Celery Beat)
+    beat_schedule={
+        "escalate-stale-reviews-every-hour": {
+            "task": "workers.review.tasks.escalate_stale_reviews",
+            "schedule": 3600,  # every hour
+            "kwargs": {"stale_hours": settings.REVIEW_QUEUE_STALE_HOURS},
+        },
+    },
 )
 
 
 @worker_ready.connect
 def on_worker_ready(**kwargs):
-    """Log worker readiness."""
-    print(f"Worker ready: {WORKER_TYPE}")
+    """Start Prometheus metrics server and log worker readiness."""
+    start_http_server(METRICS_PORT)
+    print(f"Worker ready: {WORKER_TYPE}, metrics on :{METRICS_PORT}")
 
 
 @worker_shutdown.connect
