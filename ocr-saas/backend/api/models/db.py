@@ -19,7 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from api.core.database import Base
@@ -251,7 +251,7 @@ class StructuredResult(Base):
         UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False
     )
     document_type: Mapped[DocumentType] = mapped_column(Enum(DocumentType), nullable=False)
-    extracted_data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    extracted_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     field_confidences: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
     raw_llm_response: Mapped[str | None] = mapped_column(Text)
     model_version: Mapped[str | None] = mapped_column(String(100))

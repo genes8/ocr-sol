@@ -11,9 +11,10 @@ from typing import Any
 import jsonschema
 from jsonschema import Draft7Validator
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
+from api.core.database import get_db_session
 from api.models.db import (
     Decision,
     Document,
@@ -32,11 +33,7 @@ logger = logging.getLogger(__name__)
 SCHEMA_CACHE: dict[str, dict[str, Any]] = {}
 
 
-async def get_db_session() -> AsyncSession:
-    """Get database session for workers."""
-    from api.core.database import engine
-    async_session = async_sessionmaker(engine, expire_on_commit=False)
-    return async_session()
+# get_db_session imported from api.core.database
 
 
 def update_document(
@@ -57,11 +54,11 @@ def update_document(
             )
             doc = result.scalar_one_or_none()
             if doc:
-                if status:
+                if status is not None:
                     doc.status = status
-                if decision:
+                if decision is not None:
                     doc.decision = decision
-                if error_message:
+                if error_message is not None:
                     doc.error_message = error_message
                 if processing_completed_at:
                     doc.processing_completed_at = datetime.utcnow()
@@ -251,52 +248,60 @@ async def detect_duplicate(
 
     cutoff = datetime.utcnow() - timedelta(days=90)
 
+    # extracted_data is JSONB — subscript path queries use ->> operator
+    pib_path = StructuredResult.extracted_data["supplier"]["pib"].as_string()
+
     # Primary: same PIB + invoice_number
     if invoice_number:
         result = await session.execute(
-            select(StructuredResult)
+            select(StructuredResult.id)
             .join(Document, Document.id == StructuredResult.document_id)
             .where(
                 Document.tenant_id == tenant_id,
                 Document.id != document_id,
                 Document.created_at >= cutoff,
-                StructuredResult.extracted_data["supplier"]["pib"].as_string() == str(pib),
+                pib_path == str(pib),
                 StructuredResult.extracted_data["invoice_number"].as_string() == str(invoice_number),
             )
+            .limit(1)
         )
         if result.scalar_one_or_none():
             return True
 
-    # Secondary: same PIB + total_amount within 1% tolerance
+    # Secondary: same PIB + total_amount within 1% tolerance.
+    # Candidates are limited to 200 rows to avoid unbounded scans on busy tenants.
     totals = extracted_data.get("totals", {}) or {}
-    total_raw = totals.get("grand_total") or extracted_data.get("grand_total") or extracted_data.get("total_amount")
+    total_raw = (
+        totals.get("grand_total")
+        or extracted_data.get("grand_total")
+        or extracted_data.get("total_amount")
+    )
     if total_raw is not None:
         try:
             total_amount = float(str(total_raw).replace(",", ""))
             tolerance = total_amount * 0.01
 
             result = await session.execute(
-                select(StructuredResult)
+                select(StructuredResult.id, StructuredResult.extracted_data)
                 .join(Document, Document.id == StructuredResult.document_id)
                 .where(
                     Document.tenant_id == tenant_id,
                     Document.id != document_id,
                     Document.created_at >= cutoff,
-                    StructuredResult.extracted_data["supplier"]["pib"].as_string() == str(pib),
+                    pib_path == str(pib),
                 )
+                .limit(200)
             )
-            candidates = result.scalars().all()
-            for candidate in candidates:
-                c_totals = candidate.extracted_data.get("totals", {}) or {}
+            for _, c_data in result.all():
+                c_totals = (c_data.get("totals") or {}) if c_data else {}
                 c_total_raw = (
                     c_totals.get("grand_total")
-                    or candidate.extracted_data.get("grand_total")
-                    or candidate.extracted_data.get("total_amount")
+                    or c_data.get("grand_total")
+                    or c_data.get("total_amount")
                 )
                 if c_total_raw is not None:
                     try:
-                        c_total = float(str(c_total_raw).replace(",", ""))
-                        if abs(c_total - total_amount) <= tolerance:
+                        if abs(float(str(c_total_raw).replace(",", "")) - total_amount) <= tolerance:
                             return True
                     except (ValueError, TypeError):
                         pass

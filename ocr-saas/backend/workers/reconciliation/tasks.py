@@ -7,9 +7,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
+from api.core.database import get_db_session
 from api.models.db import (
     Document,
     DocumentStatus,
@@ -22,11 +23,7 @@ from workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 
-async def get_db_session() -> AsyncSession:
-    """Get database session for workers."""
-    from api.core.database import engine
-    async_session = async_sessionmaker(engine, expire_on_commit=False)
-    return async_session()
+# get_db_session imported from api.core.database
 
 
 def update_document_status(
@@ -189,8 +186,12 @@ def reconcile_line_items(
             vat_groups[vat_rate_int]["vat_amount"] += vat_for_line
 
     # Aggregate across all groups
-    calculated_subtotal = sum(g["taxable_amount"] for g in vat_groups.values()) or Decimal("0")
-    calculated_vat = sum(g["vat_amount"] for g in vat_groups.values()) or Decimal("0")
+    calculated_subtotal = sum(
+        (g["taxable_amount"] for g in vat_groups.values()), start=Decimal("0")
+    )
+    calculated_vat = sum(
+        (g["vat_amount"] for g in vat_groups.values()), start=Decimal("0")
+    )
     calculated_total = calculated_subtotal + calculated_vat
 
     # Build per-group comparison against extracted vat_breakdown

@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.config import settings
+from api.core.database import get_db_session
 from api.models.db import Document, DocumentStatus, DocumentType, OCRResult
 from workers.celery_app import celery_app
 
@@ -103,13 +103,6 @@ CLASSIFICATION_PATTERNS = {
         "weight": 0.8,
     },
 }
-
-
-async def get_db_session() -> AsyncSession:
-    """Get database session for workers."""
-    from api.core.database import engine
-    async_session = async_sessionmaker(engine, expire_on_commit=False)
-    return async_session()
 
 
 def update_document_status(

@@ -394,6 +394,15 @@ async def get_document_page_image(
     tenant_id: uuid.UUID = Depends(get_current_tenant),
 ) -> dict:
     """Get a presigned URL for a document page image (for Review UI bbox overlay)."""
+    # Verify tenant ownership first to prevent IDOR
+    doc_query = select(Document).where(
+        Document.id == document_id,
+        Document.tenant_id == tenant_id,
+    )
+    doc_result = await db.execute(doc_query)
+    if not doc_result.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
     query = select(DocumentFile).where(
         DocumentFile.document_id == document_id,
         DocumentFile.page_number == page,
@@ -407,15 +416,6 @@ async def get_document_page_image(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Page {page} not found for document {document_id}",
         )
-
-    # Verify tenant owns this document
-    doc_query = select(Document).where(
-        Document.id == document_id,
-        Document.tenant_id == tenant_id,
-    )
-    doc_result = await db.execute(doc_query)
-    if not doc_result.scalar_one_or_none():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     url = get_presigned_url(doc_file.minio_path, expiry=3600)
     return {"url": url, "page": page, "width": doc_file.width, "height": doc_file.height}

@@ -20,6 +20,27 @@ from api.routes.schemas import (
 router = APIRouter()
 
 
+async def _assert_pib_unique(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    pib: str,
+    exclude_id: uuid.UUID | None = None,
+) -> None:
+    """Raise HTTP 409 if another supplier in this tenant already has this PIB."""
+    query = select(Supplier).where(
+        Supplier.tenant_id == tenant_id,
+        Supplier.pib == pib,
+    )
+    if exclude_id is not None:
+        query = query.where(Supplier.id != exclude_id)
+    existing = await db.execute(query)
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Supplier with PIB {pib} already exists for this tenant",
+        )
+
+
 @router.get("", response_model=SupplierListResponse)
 async def list_suppliers(
     skip: int = Query(0, ge=0),
@@ -58,17 +79,7 @@ async def create_supplier(
 ) -> SupplierResponse:
     """Create a new supplier. PIB must be unique per tenant."""
     if data.pib:
-        existing = await db.execute(
-            select(Supplier).where(
-                Supplier.tenant_id == tenant_id,
-                Supplier.pib == data.pib,
-            )
-        )
-        if existing.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Supplier with PIB {data.pib} already exists for this tenant",
-            )
+        await _assert_pib_unique(db, tenant_id, data.pib)
 
     supplier = Supplier(
         tenant_id=tenant_id,
@@ -133,18 +144,7 @@ async def update_supplier(
 
     # Check PIB uniqueness if being changed
     if data.pib is not None and data.pib != supplier.pib:
-        existing = await db.execute(
-            select(Supplier).where(
-                Supplier.tenant_id == tenant_id,
-                Supplier.pib == data.pib,
-                Supplier.id != supplier_id,
-            )
-        )
-        if existing.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Supplier with PIB {data.pib} already exists for this tenant",
-            )
+        await _assert_pib_unique(db, tenant_id, data.pib, exclude_id=supplier_id)
 
     if data.name is not None:
         supplier.name = data.name

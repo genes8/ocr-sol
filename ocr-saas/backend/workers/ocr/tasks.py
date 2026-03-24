@@ -19,6 +19,7 @@ from api.core.database import SyncSessionLocal
 from api.core.storage import get_minio_client
 from api.models.db import Document, DocumentStatus, OCRResult
 from workers.celery_app import celery_app
+from workers.llm_utils import strip_llm_fences
 
 logger = logging.getLogger(__name__)
 
@@ -180,15 +181,7 @@ Return a JSON object with the following structure:
         
         result = response.json()
         content = result["choices"][0]["message"]["content"]
-        
-        # Parse JSON from response
-        # Handle potential markdown code blocks
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-        
-        return json.loads(content.strip())
+        return json.loads(strip_llm_fences(content))
         
     except requests.exceptions.RequestException as e:
         logger.error(f"vLLM API request failed: {e}")

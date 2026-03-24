@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
+from api.core.database import get_db_session
 from api.models.db import (
     Document,
     DocumentStatus,
@@ -20,6 +21,7 @@ from api.models.db import (
     StructuredResult,
 )
 from workers.celery_app import celery_app
+from workers.llm_utils import strip_llm_fences
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +29,7 @@ logger = logging.getLogger(__name__)
 SCHEMA_CACHE: dict[str, dict[str, Any]] = {}
 
 
-async def get_db_session() -> AsyncSession:
-    """Get database session for workers."""
-    from api.core.database import engine
-    async_session = async_sessionmaker(engine, expire_on_commit=False)
-    return async_session()
+# get_db_session imported from api.core.database
 
 
 def update_document_status(
@@ -134,7 +132,7 @@ field_evidence maps each extracted field name to the index of the TEXT BLOCK (fr
 
 OCR Text to process:
 ---
-{text[:8000]}  # Limit text to avoid token limits
+{text[:8000]}
 ---
 
 Return only valid JSON, no markdown or explanation."""
@@ -184,13 +182,7 @@ def call_llm_for_extraction(
 
         result = response.json()
         content = result["choices"][0]["message"]["content"]
-
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-
-        parsed = json.loads(content.strip())
+        parsed = json.loads(strip_llm_fences(content))
 
         # Feature 2: Resolve field_evidence indices → actual bbox blocks
         bbox_evidence: dict[str, Any] = {}
