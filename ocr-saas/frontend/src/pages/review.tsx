@@ -66,6 +66,8 @@ export function Review() {
   const [currentPage, setCurrentPage] = useState(1);
   const [zoom, setZoom] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const [isActioning, setIsActioning] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Fetch both "review" and "manual_review" documents for the queue.
   // "manual_review" includes unknown documents routed there by the classifier.
@@ -119,25 +121,37 @@ export function Review() {
 
   const handleApprove = async () => {
     if (!id) return;
+    setIsActioning(true);
     try {
       await documentsApi.update(id, { decision: "auto" });
+      setActionError(null);
       toast.success("Document approved");
       refetchDoc();
       refetchList();
     } catch (e) {
-      toast.error("Approve failed: " + (e instanceof Error ? e.message : "Unknown error"));
+      const msg = "Approve failed: " + (e instanceof Error ? e.message : "Unknown error");
+      setActionError(msg);
+      toast.error(msg);
+    } finally {
+      setIsActioning(false);
     }
   };
 
   const handleReject = async () => {
     if (!id) return;
+    setIsActioning(true);
     try {
       await documentsApi.update(id, { decision: "manual" });
+      setActionError(null);
       toast.success("Document rejected — moved to manual review");
       refetchDoc();
       refetchList();
     } catch (e) {
-      toast.error("Reject failed: " + (e instanceof Error ? e.message : "Unknown error"));
+      const msg = "Reject failed: " + (e instanceof Error ? e.message : "Unknown error");
+      setActionError(msg);
+      toast.error(msg);
+    } finally {
+      setIsActioning(false);
     }
   };
 
@@ -310,6 +324,7 @@ export function Review() {
               <button
                 onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                 disabled={currentPage <= 1}
+                aria-label="Previous page"
                 className="p-1 disabled:opacity-40 hover:bg-gray-100 rounded"
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -320,26 +335,36 @@ export function Review() {
               <button
                 onClick={() => setCurrentPage((p) => Math.min(pageCount, p + 1))}
                 disabled={currentPage >= pageCount}
+                aria-label="Next page"
                 className="p-1 disabled:opacity-40 hover:bg-gray-100 rounded"
               >
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
           )}
-          <button
-            onClick={handleReject}
-            className="flex items-center gap-2 px-4 py-2 text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
-          >
-            <X className="w-4 h-4" />
-            Reject
-          </button>
-          <button
-            onClick={handleApprove}
-            className="flex items-center gap-2 px-4 py-2 text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors"
-          >
-            <Check className="w-4 h-4" />
-            Approve
-          </button>
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleReject}
+                disabled={isActioning}
+                className="flex items-center gap-2 px-4 py-2 text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50"
+              >
+                {isActioning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
+                Reject
+              </button>
+              <button
+                onClick={handleApprove}
+                disabled={isActioning}
+                className="flex items-center gap-2 px-4 py-2 text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50"
+              >
+                {isActioning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                Approve
+              </button>
+            </div>
+            {actionError && (
+              <p className="text-xs text-red-600 mt-1">{actionError}</p>
+            )}
+          </div>
         </div>
       </div>
 

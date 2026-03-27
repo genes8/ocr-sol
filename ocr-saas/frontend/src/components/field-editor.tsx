@@ -105,6 +105,7 @@ function FieldRow({
                 onClick={handleSave}
                 className="p-1.5 text-green-600 hover:bg-green-50 rounded"
                 title="Save"
+                aria-label="Save field"
               >
                 <Save className="w-4 h-4" />
               </button>
@@ -112,6 +113,7 @@ function FieldRow({
                 onClick={handleCancel}
                 className="p-1.5 text-gray-500 hover:bg-gray-100 rounded"
                 title="Cancel"
+                aria-label="Cancel"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -184,6 +186,7 @@ export function FieldEditor({
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label="Search fields"
           />
           <select
             value={filterConfidence ?? ""}
@@ -191,6 +194,7 @@ export function FieldEditor({
               setFilterConfidence(e.target.value ? Number(e.target.value) : null)
             }
             className="px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label="Filter by confidence"
           >
             <option value="">All confidence</option>
             <option value="0.85">High only (≥85%)</option>

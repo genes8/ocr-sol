@@ -96,18 +96,23 @@ export function DocumentViewer({
           onClick={() => onZoomChange?.(Math.min(4, zoom + 0.25))}
           className="p-2.5 bg-blue-600 text-white rounded-lg shadow-lg hover:bg-blue-700 active:bg-blue-800 transition-colors"
           title="Zoom in"
+          aria-label="Zoom in"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
           </svg>
         </button>
-        <div className="p-2 bg-gray-800 text-white rounded-lg shadow-lg text-xs font-semibold text-center min-w-[48px]">
+        <div
+          className="p-2 bg-gray-800 text-white rounded-lg shadow-lg text-xs font-semibold text-center min-w-[48px]"
+          aria-label={`Zoom level ${Math.round(zoom * 100)}%`}
+        >
           {Math.round(zoom * 100)}%
         </div>
         <button
           onClick={() => onZoomChange?.(Math.max(0.25, zoom - 0.25))}
           className="p-2.5 bg-blue-600 text-white rounded-lg shadow-lg hover:bg-blue-700 active:bg-blue-800 transition-colors"
           title="Zoom out"
+          aria-label="Zoom out"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M20 12H4" />
@@ -120,6 +125,7 @@ export function DocumentViewer({
           }}
           className="p-2.5 bg-gray-600 text-white rounded-lg shadow-lg hover:bg-gray-700 active:bg-gray-800 transition-colors"
           title="Reset view"
+          aria-label="Reset view"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
             <path
