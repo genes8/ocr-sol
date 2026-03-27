@@ -26,6 +26,7 @@ export function DocumentViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
 
   // Mouse wheel zoom — must be non-passive to call preventDefault
   useEffect(() => {
@@ -158,6 +159,10 @@ export function DocumentViewer({
               className="select-none shadow-lg"
               style={{ maxWidth: "800px", width: "100%", height: "auto" }}
               draggable={false}
+              onLoad={(e) => {
+                const img = e.currentTarget;
+                setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
+              }}
             />
           ) : (
             <div className="w-[800px] h-[1100px] bg-white shadow-lg flex items-center justify-center text-gray-400">
@@ -169,6 +174,7 @@ export function DocumentViewer({
           {imageUrl && (
             <svg
               className="absolute inset-0 w-full h-full pointer-events-none"
+              viewBox={naturalSize ? `0 0 ${naturalSize.w} ${naturalSize.h}` : undefined}
               style={{ overflow: "visible" }}
             >
               {/* All blocks — highlighted by direct bbox match */}

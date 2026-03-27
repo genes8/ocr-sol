@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -60,6 +60,7 @@ function flattenFields(
 
 export function Review() {
   const { id } = useParams<{ id?: string }>();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [selectedField, setSelectedField] = useState<string | undefined>();
   const [selectedBbox, setSelectedBbox] = useState<BoundingBox | undefined>();
@@ -126,8 +127,8 @@ export function Review() {
       await documentsApi.update(id, { decision: "auto" });
       setActionError(null);
       toast.success("Document approved");
-      refetchDoc();
       refetchList();
+      navigate("/review");
     } catch (e) {
       const msg = "Approve failed: " + (e instanceof Error ? e.message : "Unknown error");
       setActionError(msg);
@@ -144,8 +145,8 @@ export function Review() {
       await documentsApi.update(id, { decision: "manual" });
       setActionError(null);
       toast.success("Document rejected — moved to manual review");
-      refetchDoc();
       refetchList();
+      navigate("/review");
     } catch (e) {
       const msg = "Reject failed: " + (e instanceof Error ? e.message : "Unknown error");
       setActionError(msg);
