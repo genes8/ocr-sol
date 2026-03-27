@@ -205,13 +205,25 @@ async def upload_document(
 
     minio_path = f"documents/{tenant_id}/{stored_filename}"
 
-    file_content = await file.read()
+    # Stream directly to MinIO when the Content-Length is known (avoids full in-memory buffer).
+    # When file.size is None (e.g. chunked transfer encoding), fall back to buffering.
+    known_size: int | None = file.size
+    if known_size is not None:
+        file.file.seek(0)
+        data_stream: io.IOBase = file.file
+        upload_length = known_size
+    else:
+        file_content = await file.read()
+        data_stream = io.BytesIO(file_content)
+        upload_length = len(file_content)
+        known_size = upload_length
+
     try:
         get_minio_client().put_object(
             bucket_name=settings.MINIO_BUCKET_DOCUMENTS,
             object_name=minio_path,
-            data=io.BytesIO(file_content),
-            length=len(file_content),
+            data=data_stream,
+            length=upload_length,
             content_type=file.content_type,
         )
     except Exception as e:
@@ -224,7 +236,7 @@ async def upload_document(
         filename=stored_filename,
         original_filename=original_filename,
         content_type=file.content_type,
-        file_size=len(file_content),
+        file_size=known_size,
         status=DocumentStatus.PENDING,
     )
     db.add(document)
@@ -233,7 +245,7 @@ async def upload_document(
         document_id=document_id,
         file_type="original",
         minio_path=minio_path,
-        file_size=len(file_content),
+        file_size=known_size,
     )
     db.add(doc_file)
 
@@ -241,7 +253,7 @@ async def upload_document(
         db, tenant_id, "document.uploaded",
         document_id=document_id,
         actor=f"api:{tenant_id}",
-        payload={"filename": original_filename, "file_size": len(file_content)},
+        payload={"filename": original_filename, "file_size": known_size},
     )
     await db.commit()
     await db.refresh(document)

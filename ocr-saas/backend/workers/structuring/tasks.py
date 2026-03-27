@@ -49,6 +49,10 @@ def write_audit_event(
 
 logger = logging.getLogger(__name__)
 
+# Maximum OCR text characters sent to the structuring LLM.
+# Documents exceeding this are truncated; a warning is logged when it occurs.
+_MAX_OCR_TEXT_CHARS = 8000
+
 # Schema cache
 SCHEMA_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -126,6 +130,14 @@ def build_extraction_prompt(
             )
         blocks_section = "\n".join(lines) + "\n\n"
 
+    truncated_text = text[:_MAX_OCR_TEXT_CHARS]
+    if len(text) > _MAX_OCR_TEXT_CHARS:
+        logger.warning(
+            "OCR text truncated from %d to %d chars before LLM structuring",
+            len(text),
+            _MAX_OCR_TEXT_CHARS,
+        )
+
     prompt = f"""You are an expert document parser. Extract structured data from the following {document_type.value} document.
 
 {blocks_section}Extract all fields according to this JSON schema:
@@ -151,7 +163,7 @@ field_evidence maps each extracted field name to the index of the TEXT BLOCK (fr
 
 OCR Text to process:
 ---
-{text[:8000]}
+{truncated_text}
 ---
 
 Return only valid JSON, no markdown or explanation."""
