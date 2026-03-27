@@ -3,7 +3,7 @@
 import hashlib
 import secrets
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -181,7 +181,7 @@ async def create_api_key(
 
     expires_at = None
     if data.expires_in_days:
-        expires_at = datetime.utcnow() + timedelta(days=data.expires_in_days)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=data.expires_in_days)
 
     api_key = APIKey(
         tenant_id=tenant_id,

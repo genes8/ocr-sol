@@ -10,8 +10,8 @@ from typing import Any
 from sqlalchemy import select
 
 from api.core.config import settings
-from api.core.database import get_db_session
-from api.models.db import Decision, Document, DocumentStatus, DocumentType, OCRResult
+from api.core.database import SyncSessionLocal
+from api.models.db import AuditLog, Decision, Document, DocumentStatus, DocumentType, OCRResult
 from workers.celery_app import celery_app
 
 
@@ -22,26 +22,19 @@ def write_audit_event(
     actor: str = "system",
     payload: dict | None = None,
 ) -> None:
-    """Write audit event from async worker context."""
-    import asyncio
-
-    async def _write():
-        from api.core.audit import write_audit
-        session = await get_db_session()
-        try:
-            await write_audit(
-                session,
-                uuid.UUID(tenant_id),
-                event,
-                document_id=uuid.UUID(document_id) if document_id else None,
-                actor=actor,
-                payload=payload,
-            )
-            await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_write())
+    """Write audit event from sync worker context."""
+    session = SyncSessionLocal()
+    try:
+        session.add(AuditLog(
+            tenant_id=uuid.UUID(tenant_id),
+            document_id=uuid.UUID(document_id) if document_id else None,
+            actor=actor,
+            event=event,
+            payload=payload,
+        ))
+        session.commit()
+    finally:
+        session.close()
 
 logger = logging.getLogger(__name__)
 
@@ -136,23 +129,18 @@ CLASSIFICATION_PATTERNS = {
 
 def _set_document_decision(document_id: str, decision: Decision, reasoning: str) -> None:
     """Set document decision directly in database."""
-    import asyncio
-
-    async def _update():
-        session = await get_db_session()
-        try:
-            result = await session.execute(
-                select(Document).where(Document.id == uuid.UUID(document_id))
-            )
-            doc = result.scalar_one_or_none()
-            if doc:
-                doc.decision = decision
-                doc.error_message = reasoning
-                await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_update())
+    session = SyncSessionLocal()
+    try:
+        result = session.execute(
+            select(Document).where(Document.id == uuid.UUID(document_id))
+        )
+        doc = result.scalar_one_or_none()
+        if doc:
+            doc.decision = decision
+            doc.error_message = reasoning
+            session.commit()
+    finally:
+        session.close()
 
 
 def update_document_status(
@@ -162,25 +150,20 @@ def update_document_status(
     error_message: str | None = None,
 ) -> None:
     """Update document status and type in database."""
-    import asyncio
-    
-    async def _update():
-        session = await get_db_session()
-        try:
-            result = await session.execute(
-                select(Document).where(Document.id == uuid.UUID(document_id))
-            )
-            doc = result.scalar_one_or_none()
-            if doc:
-                doc.status = status
-                doc.error_message = error_message
-                if document_type:
-                    doc.document_type = document_type
-                await session.commit()
-        finally:
-            await session.close()
-    
-    asyncio.run(_update())
+    session = SyncSessionLocal()
+    try:
+        result = session.execute(
+            select(Document).where(Document.id == uuid.UUID(document_id))
+        )
+        doc = result.scalar_one_or_none()
+        if doc:
+            doc.status = status
+            doc.error_message = error_message
+            if document_type:
+                doc.document_type = document_type
+            session.commit()
+    finally:
+        session.close()
 
 
 def classify_document(text: str) -> ClassificationResult:
@@ -321,21 +304,16 @@ def classify_document_task(self, document_id: str, tenant_id: str, priority: int
         update_document_status(document_id, DocumentStatus.CLASSIFIED)
         
         # Get OCR result
-        import asyncio
-        
-        async def _get_ocr():
-            session = await get_db_session()
-            try:
-                result = await session.execute(
-                    select(OCRResult).where(
-                        OCRResult.document_id == uuid.UUID(document_id)
-                    )
+        _session = SyncSessionLocal()
+        try:
+            _result = _session.execute(
+                select(OCRResult).where(
+                    OCRResult.document_id == uuid.UUID(document_id)
                 )
-                return result.scalar_one_or_none()
-            finally:
-                await session.close()
-        
-        ocr_result = asyncio.run(_get_ocr())
+            )
+            ocr_result = _result.scalar_one_or_none()
+        finally:
+            _session.close()
         if not ocr_result:
             raise ValueError(f"No OCR result found for document {document_id}")
         

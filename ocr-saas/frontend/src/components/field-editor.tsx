@@ -156,7 +156,7 @@ export function FieldEditor({
       formatValue(field.value).toLowerCase().includes(searchTerm.toLowerCase());
 
     const matchesConfidence =
-      filterConfidence === null || field.confidence < filterConfidence;
+      filterConfidence === null || field.confidence >= filterConfidence;
 
     return matchesSearch && matchesConfidence;
   });
@@ -193,9 +193,9 @@ export function FieldEditor({
             className="px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             <option value="">All confidence</option>
-            <option value="0.85">High</option>
-            <option value="0.70">Medium</option>
-            <option value="1">Low</option>
+            <option value="0.85">High only (≥85%)</option>
+            <option value="0.70">Medium+ (≥70%)</option>
+            <option value="0.50">Low+ (≥50%)</option>
           </select>
         </div>
       </div>

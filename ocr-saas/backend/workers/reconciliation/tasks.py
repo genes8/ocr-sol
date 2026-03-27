@@ -8,11 +8,11 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
-from api.core.database import get_db_session
+from api.core.database import SyncSessionLocal
 from api.models.db import (
+    AuditLog,
     Document,
     DocumentStatus,
     DocumentType,
@@ -29,31 +29,21 @@ def write_audit_event(
     actor: str = "system",
     payload: dict | None = None,
 ) -> None:
-    """Write audit event from async worker context."""
-    import asyncio
-
-    async def _write():
-        from api.core.audit import write_audit
-        session = await get_db_session()
-        try:
-            await write_audit(
-                session,
-                uuid.UUID(tenant_id),
-                event,
-                document_id=uuid.UUID(document_id) if document_id else None,
-                actor=actor,
-                payload=payload,
-            )
-            await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_write())
+    """Write audit event from sync worker context."""
+    session = SyncSessionLocal()
+    try:
+        session.add(AuditLog(
+            tenant_id=uuid.UUID(tenant_id),
+            document_id=uuid.UUID(document_id) if document_id else None,
+            actor=actor,
+            event=event,
+            payload=payload,
+        ))
+        session.commit()
+    finally:
+        session.close()
 
 logger = logging.getLogger(__name__)
-
-
-# get_db_session imported from api.core.database
 
 
 def update_document_status(
@@ -62,23 +52,18 @@ def update_document_status(
     error_message: str | None = None,
 ) -> None:
     """Update document status in database."""
-    import asyncio
-
-    async def _update():
-        session = await get_db_session()
-        try:
-            result = await session.execute(
-                select(Document).where(Document.id == uuid.UUID(document_id))
-            )
-            doc = result.scalar_one_or_none()
-            if doc:
-                doc.status = status
-                doc.error_message = error_message
-                await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_update())
+    session = SyncSessionLocal()
+    try:
+        result = session.execute(
+            select(Document).where(Document.id == uuid.UUID(document_id))
+        )
+        doc = result.scalar_one_or_none()
+        if doc:
+            doc.status = status
+            doc.error_message = error_message
+            session.commit()
+    finally:
+        session.close()
 
 
 def parse_amount(value: Any) -> Decimal | None:
@@ -361,13 +346,13 @@ def reconcile_line_items(
     }
 
 
-async def save_reconciliation_log(
+def save_reconciliation_log(
     document_id: str,
     reconciliation: dict[str, Any],
     processing_time_ms: int,
 ) -> str:
     """Save reconciliation log to database (upsert — idempotent per document)."""
-    session = await get_db_session()
+    session = SyncSessionLocal()
     try:
         values = {
             "id": uuid.uuid4(),
@@ -396,11 +381,11 @@ async def save_reconciliation_log(
             )
             .returning(ReconciliationLog.id)
         )
-        result = await session.execute(stmt)
-        await session.commit()
+        result = session.execute(stmt)
+        session.commit()
         return str(result.scalar_one())
     finally:
-        await session.close()
+        session.close()
 
 
 @celery_app.task(bind=True, name="workers.reconciliation.tasks.reconcile_document")
@@ -427,21 +412,15 @@ def reconcile_document(self, document_id: str, tenant_id: str, priority: int = 5
     try:
         update_document_status(document_id, DocumentStatus.RECONCILIATION)
 
-        import asyncio
-
-        async def _get_structured():
-            session = await get_db_session()
-            try:
-                result = await session.execute(
-                    select(StructuredResult).where(
-                        StructuredResult.document_id == uuid.UUID(document_id)
-                    )
+        _session = SyncSessionLocal()
+        try:
+            structured = _session.execute(
+                select(StructuredResult).where(
+                    StructuredResult.document_id == uuid.UUID(document_id)
                 )
-                return result.scalar_one_or_none()
-            finally:
-                await session.close()
-
-        structured = asyncio.run(_get_structured())
+            ).scalar_one_or_none()
+        finally:
+            _session.close()
         if not structured:
             logger.info(f"No structured result for document {document_id}, skipping reconciliation")
             update_document_status(document_id, DocumentStatus.VALIDATING)
@@ -464,11 +443,11 @@ def reconcile_document(self, document_id: str, tenant_id: str, priority: int = 5
 
         processing_time_ms = int((time.time() - start_time) * 1000)
 
-        asyncio.run(save_reconciliation_log(
+        save_reconciliation_log(
             document_id=document_id,
             reconciliation=reconciliation,
             processing_time_ms=processing_time_ms,
-        ))
+        )
 
         update_document_status(document_id, DocumentStatus.VALIDATING)
         from workers.validation.tasks import validate_document

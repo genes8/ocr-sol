@@ -171,8 +171,6 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-      vllm:
-        condition: service_healthy
     volumes:
       - ./backend:/app
       - model_cache:/root/.cache
@@ -183,6 +181,8 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    profiles:
+      - gpu
     command: celery -A workers.celery_app worker --loglevel=info -Q ocr_queue -c 1
 
   # vLLM Model Server — GLM-OCR vision model (port 8001)

@@ -1,9 +1,12 @@
 """Document management API routes."""
 
 import io
+import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
+
+logger = logging.getLogger(__name__)
 
 from fastapi import (
     APIRouter,
@@ -17,7 +20,8 @@ from fastapi import (
 )
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload, flag_modified
+from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
 
 from api.core.audit import write_audit
 from api.core.config import settings
@@ -57,9 +61,7 @@ async def get_document_stats(
     tenant_id: uuid.UUID = Depends(get_current_tenant),
 ) -> dict:
     """Return document processing statistics and quota usage for the current tenant."""
-    from datetime import datetime as dt
-
-    now = dt.utcnow()
+    now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     # Total documents this month
@@ -153,14 +155,15 @@ async def upload_document(
         )
 
     # Fetch tenant once — reused for quota, concurrency, and priority checks
-    tenant_for_quota = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    # Lock the tenant row to prevent TOCTOU race on quota check
+    tenant_for_quota = await db.execute(select(Tenant).where(Tenant.id == tenant_id).with_for_update())
     tenant_quota = tenant_for_quota.scalar_one_or_none()
     tenant_settings = (tenant_quota.settings or {}) if tenant_quota else {}
 
     # Gap2: Per-tenant monthly document quota check
     monthly_limit = tenant_settings.get("max_documents_per_month")
     if monthly_limit:
-        month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         count_result = await db.execute(
             select(func.count()).select_from(Document).where(
                 Document.tenant_id == tenant_id,
@@ -203,13 +206,17 @@ async def upload_document(
     minio_path = f"documents/{tenant_id}/{stored_filename}"
 
     file_content = await file.read()
-    get_minio_client().put_object(
-        bucket_name=settings.MINIO_BUCKET_DOCUMENTS,
-        object_name=minio_path,
-        data=io.BytesIO(file_content),
-        length=len(file_content),
-        content_type=file.content_type,
-    )
+    try:
+        get_minio_client().put_object(
+            bucket_name=settings.MINIO_BUCKET_DOCUMENTS,
+            object_name=minio_path,
+            data=io.BytesIO(file_content),
+            length=len(file_content),
+            content_type=file.content_type,
+        )
+    except Exception as e:
+        logger.error("MinIO upload failed for document %s: %s", document_id, e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Storage upload failed")
 
     document = Document(
         id=document_id,
@@ -496,7 +503,7 @@ async def update_document(
             DocumentStatus.REVIEW, DocumentStatus.MANUAL_REVIEW
         ):
             document.status = DocumentStatus.COMPLETED
-            document.processing_completed_at = datetime.utcnow()
+            document.processing_completed_at = datetime.now(timezone.utc)
         await write_audit(
             db, tenant_id, "document.decision_override",
             document_id=document_id,
@@ -510,7 +517,7 @@ async def update_document(
     if update_data.metadata is not None:
         document.doc_metadata = update_data.metadata
 
-    document.updated_at = datetime.utcnow()
+    document.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(document)
@@ -562,8 +569,20 @@ async def update_document_fields(
     extracted = copy.deepcopy(structured_result.extracted_data or {})
     confs = dict(structured_result.field_confidences or {})
 
+    MAX_FIELD_DEPTH = 4
     for field_path, value in data.fields.items():
         parts = field_path.split(".")
+        if len(parts) > MAX_FIELD_DEPTH:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Field path too deep: {field_path}",
+            )
+        for part in parts:
+            if not part.isidentifier():
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid field name: {part}",
+                )
         target = extracted
         for part in parts[:-1]:
             target = target.setdefault(part, {})
@@ -647,7 +666,7 @@ async def get_document_page_image(
             detail=f"Page {page} not found for document {document_id}",
         )
 
-    url = get_presigned_url(doc_file.minio_path, expiry=3600)
+    url = get_presigned_url(doc_file.minio_path, expiry=settings.PRESIGNED_URL_EXPIRY_SECONDS)
     return {"url": url, "page": page, "width": doc_file.width, "height": doc_file.height}
 
 

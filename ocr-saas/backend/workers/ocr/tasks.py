@@ -17,9 +17,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from api.core.config import settings
-from api.core.database import SyncSessionLocal, get_db_session
+from api.core.database import SyncSessionLocal
 from api.core.storage import get_minio_client
-from api.models.db import Document, DocumentStatus, OCRResult
+from api.models.db import AuditLog, Document, DocumentStatus, OCRResult
 from workers.celery_app import celery_app
 from workers.llm_utils import strip_llm_fences
 
@@ -32,26 +32,18 @@ def write_audit_event(
     payload: dict | None = None,
 ) -> None:
     """Write audit event from sync worker context."""
-    import asyncio
-
-    async def _write():
-        from api.core.audit import write_audit
-        import uuid as _uuid
-        session = await get_db_session()
-        try:
-            await write_audit(
-                session,
-                _uuid.UUID(tenant_id),
-                event,
-                document_id=_uuid.UUID(document_id) if document_id else None,
-                actor=actor,
-                payload=payload,
-            )
-            await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_write())
+    session = SyncSessionLocal()
+    try:
+        session.add(AuditLog(
+            tenant_id=uuid.UUID(tenant_id),
+            document_id=uuid.UUID(document_id) if document_id else None,
+            actor=actor,
+            event=event,
+            payload=payload,
+        ))
+        session.commit()
+    finally:
+        session.close()
 
 logger = logging.getLogger(__name__)
 

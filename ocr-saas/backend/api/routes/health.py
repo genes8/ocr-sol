@@ -1,6 +1,6 @@
 """Health check API routes."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, status
 from pydantic import BaseModel
@@ -71,7 +71,7 @@ async def health_check() -> HealthResponse:
     return HealthResponse(
         status=overall,
         version=settings.APP_VERSION,
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
         services=services,
     )
 

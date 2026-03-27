@@ -1,7 +1,10 @@
 """Database connection and session management."""
 
+import logging
 from collections.abc import AsyncGenerator
 from contextvars import ContextVar
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import (
@@ -65,6 +68,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             yield session
             await session.commit()
         except Exception:
+            logger.exception("Database session error — rolling back")
             await session.rollback()
             raise
         finally:
@@ -73,12 +77,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def get_db_session() -> AsyncSession:
     """Get a database session without context manager."""
-    session = async_session_maker()
-    try:
-        return session
-    except Exception:
-        await session.close()
-        raise
+    return async_session_maker()
 
 
 async def init_db() -> None:

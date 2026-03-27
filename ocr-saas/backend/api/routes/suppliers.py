@@ -1,14 +1,14 @@
 """Supplier registry API routes."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.database import get_db
-from api.core.security import get_current_tenant
+from api.core.security import get_current_tenant, require_role
 from api.models.db import Supplier
 from api.routes.schemas import (
     SupplierCreate,
@@ -75,7 +75,7 @@ async def list_suppliers(
 async def create_supplier(
     data: SupplierCreate,
     db: AsyncSession = Depends(get_db),
-    tenant_id: uuid.UUID = Depends(get_current_tenant),
+    tenant_id: uuid.UUID = require_role("admin", "reviewer"),
 ) -> SupplierResponse:
     """Create a new supplier. PIB must be unique per tenant."""
     if data.pib:
@@ -125,7 +125,7 @@ async def update_supplier(
     supplier_id: uuid.UUID,
     data: SupplierUpdate,
     db: AsyncSession = Depends(get_db),
-    tenant_id: uuid.UUID = Depends(get_current_tenant),
+    tenant_id: uuid.UUID = require_role("admin", "reviewer"),
 ) -> SupplierResponse:
     """Update a supplier."""
     result = await db.execute(
@@ -159,7 +159,7 @@ async def update_supplier(
     if data.is_active is not None:
         supplier.is_active = data.is_active
 
-    supplier.updated_at = datetime.utcnow()
+    supplier.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(supplier)

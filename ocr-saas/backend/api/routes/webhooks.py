@@ -3,8 +3,9 @@
 import hashlib
 import hmac
 import json
+import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -13,9 +14,11 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
-from api.core.database import get_db
+from api.core.database import async_session_maker, get_db
 from api.core.security import get_current_tenant
 from api.models.db import Webhook, WebhookDelivery
+
+logger = logging.getLogger(__name__)
 from api.routes.schemas import (
     WebhookCreate,
     WebhookListResponse,
@@ -54,7 +57,7 @@ async def deliver_webhook(
     payload: dict[str, Any],
 ) -> None:
     """Deliver a webhook payload to the configured URL."""
-    async with AsyncSession(async_sessionmaker) as db:
+    async with async_session_maker() as db:
         result = await db.execute(
             select(Webhook).where(
                 Webhook.id == webhook_id,
@@ -98,7 +101,7 @@ async def deliver_webhook(
 
             delivery.status_code = response.status_code
             delivery.response_body = response.text[:1000] if response.text else None
-            delivery.delivered_at = datetime.utcnow()
+            delivery.delivered_at = datetime.now(timezone.utc)
 
         except httpx.TimeoutException as e:
             delivery.error_message = f"Timeout: {str(e)}"
@@ -222,7 +225,7 @@ async def update_webhook(
     webhook.headers = data.headers
     webhook.retry_count = data.retry_count
     webhook.retry_delay_seconds = data.retry_delay_seconds
-    webhook.updated_at = datetime.utcnow()
+    webhook.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(webhook)
@@ -279,7 +282,7 @@ async def test_webhook(
 
     payload = {
         "event": "webhook.test",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "data": {
             "message": "This is a test webhook delivery",
             "webhook_id": str(webhook_id),

@@ -4,18 +4,19 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import jsonschema
 from jsonschema import Draft7Validator
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from api.core.config import settings
-from api.core.database import get_db_session
+from api.core.database import SyncSessionLocal
 from api.models.db import (
+    AuditLog,
     Decision,
     Document,
     DocumentStatus,
@@ -80,25 +81,18 @@ def write_audit_event(
     payload: dict[str, Any] | None = None,
 ) -> None:
     """Write audit event from sync worker context."""
-    import asyncio
-
-    async def _write():
-        from api.core.audit import write_audit
-        session = await get_db_session()
-        try:
-            await write_audit(
-                session,
-                uuid.UUID(tenant_id),
-                event,
-                document_id=uuid.UUID(document_id) if document_id else None,
-                actor=actor,
-                payload=payload,
-            )
-            await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_write())
+    session = SyncSessionLocal()
+    try:
+        session.add(AuditLog(
+            tenant_id=uuid.UUID(tenant_id),
+            document_id=uuid.UUID(document_id) if document_id else None,
+            actor=actor,
+            event=event,
+            payload=payload,
+        ))
+        session.commit()
+    finally:
+        session.close()
 
 
 # get_db_session imported from api.core.database
@@ -112,29 +106,24 @@ def update_document(
     processing_completed_at: bool = False,
 ) -> None:
     """Update document in database."""
-    import asyncio
-
-    async def _update():
-        session = await get_db_session()
-        try:
-            result = await session.execute(
-                select(Document).where(Document.id == uuid.UUID(document_id))
-            )
-            doc = result.scalar_one_or_none()
-            if doc:
-                if status is not None:
-                    doc.status = status
-                if decision is not None:
-                    doc.decision = decision
-                if error_message is not None:
-                    doc.error_message = error_message
-                if processing_completed_at:
-                    doc.processing_completed_at = datetime.utcnow()
-                await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_update())
+    session = SyncSessionLocal()
+    try:
+        result = session.execute(
+            select(Document).where(Document.id == uuid.UUID(document_id))
+        )
+        doc = result.scalar_one_or_none()
+        if doc:
+            if status is not None:
+                doc.status = status
+            if decision is not None:
+                doc.decision = decision
+            if error_message is not None:
+                doc.error_message = error_message
+            if processing_completed_at:
+                doc.processing_completed_at = datetime.now(timezone.utc)
+            session.commit()
+    finally:
+        session.close()
 
 
 def load_schema(document_type: DocumentType) -> dict[str, Any]:
@@ -267,10 +256,10 @@ def get_tenant_confidence_thresholds(tenant: Tenant | None) -> dict[str, float]:
     return defaults
 
 
-async def lookup_supplier(
+def lookup_supplier(
     tenant_id: uuid.UUID,
     extracted_data: dict[str, Any],
-    session: AsyncSession,
+    session: Session,
 ) -> dict[str, Any] | None:
     """Look up a supplier by PIB from extracted data.
 
@@ -282,7 +271,7 @@ async def lookup_supplier(
     if not pib:
         return None
 
-    result = await session.execute(
+    result = session.execute(
         select(Supplier).where(
             Supplier.tenant_id == tenant_id,
             Supplier.pib == str(pib),
@@ -304,11 +293,11 @@ async def lookup_supplier(
     }
 
 
-async def detect_duplicate(
+def detect_duplicate(
     tenant_id: uuid.UUID,
     extracted_data: dict[str, Any],
     document_id: uuid.UUID,
-    session: AsyncSession,
+    session: Session,
 ) -> bool:
     """Detect potential duplicate invoices.
 
@@ -322,14 +311,14 @@ async def detect_duplicate(
     if not pib:
         return False
 
-    cutoff = datetime.utcnow() - timedelta(days=90)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=90)
 
     # extracted_data is JSONB — subscript path queries use ->> operator
     pib_path = StructuredResult.extracted_data["supplier"]["pib"].as_string()
 
     # Primary: same PIB + invoice_number
     if invoice_number:
-        result = await session.execute(
+        result = session.execute(
             select(StructuredResult.id)
             .join(Document, Document.id == StructuredResult.document_id)
             .where(
@@ -357,7 +346,7 @@ async def detect_duplicate(
             total_amount = float(str(total_raw).replace(",", ""))
             tolerance = total_amount * 0.01
 
-            result = await session.execute(
+            result = session.execute(
                 select(StructuredResult.id, StructuredResult.extracted_data)
                 .join(Document, Document.id == StructuredResult.document_id)
                 .where(
@@ -502,59 +491,46 @@ def validate_document(self, document_id: str, tenant_id: str, priority: int = 5)
     try:
         update_document(document_id, status=DocumentStatus.VALIDATING)
 
-        import asyncio
+        _session = SyncSessionLocal()
+        try:
+            doc = _session.execute(
+                select(Document).where(Document.id == uuid.UUID(document_id))
+            ).scalar_one_or_none()
 
-        async def _get_data():
-            session = await get_db_session()
-            try:
-                doc_result = await session.execute(
-                    select(Document).where(Document.id == uuid.UUID(document_id))
+            structured = _session.execute(
+                select(StructuredResult).where(
+                    StructuredResult.document_id == uuid.UUID(document_id)
                 )
-                doc = doc_result.scalar_one_or_none()
+            ).scalar_one_or_none()
 
-                structured_result = await session.execute(
-                    select(StructuredResult).where(
-                        StructuredResult.document_id == uuid.UUID(document_id)
-                    )
+            reconciliation = _session.execute(
+                select(ReconciliationLog).where(
+                    ReconciliationLog.document_id == uuid.UUID(document_id)
                 )
-                structured = structured_result.scalar_one_or_none()
+            ).scalar_one_or_none()
 
-                reconciliation_result = await session.execute(
-                    select(ReconciliationLog).where(
-                        ReconciliationLog.document_id == uuid.UUID(document_id)
-                    )
+            tenant = _session.execute(
+                select(Tenant).where(Tenant.id == uuid.UUID(tenant_id))
+            ).scalar_one_or_none()
+
+            supplier_match = None
+            is_duplicate = False
+            if structured:
+                supplier_match = lookup_supplier(
+                    uuid.UUID(tenant_id),
+                    structured.extracted_data,
+                    _session,
                 )
-                reconciliation = reconciliation_result.scalar_one_or_none()
-
-                tenant_result = await session.execute(
-                    select(Tenant).where(Tenant.id == uuid.UUID(tenant_id))
+                is_duplicate = detect_duplicate(
+                    uuid.UUID(tenant_id),
+                    structured.extracted_data,
+                    uuid.UUID(document_id),
+                    _session,
                 )
-                tenant = tenant_result.scalar_one_or_none()
-
-                # Feature 4: Supplier lookup and duplicate detection
-                supplier_match = None
-                is_duplicate = False
-                if structured:
-                    supplier_match = await lookup_supplier(
-                        uuid.UUID(tenant_id),
-                        structured.extracted_data,
-                        session,
-                    )
-                    is_duplicate = await detect_duplicate(
-                        uuid.UUID(tenant_id),
-                        structured.extracted_data,
-                        uuid.UUID(document_id),
-                        session,
-                    )
-                    # Persist supplier lookup result
-                    structured.supplier_lookup_result = supplier_match
-                    await session.commit()
-
-                return doc, structured, reconciliation, tenant, supplier_match, is_duplicate
-            finally:
-                await session.close()
-
-        doc, structured, reconciliation, tenant, supplier_match, is_duplicate = asyncio.run(_get_data())
+                structured.supplier_lookup_result = supplier_match
+                _session.commit()
+        finally:
+            _session.close()
 
         if not doc or not structured:
             raise ValueError(f"Document {document_id} data incomplete")

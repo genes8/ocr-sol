@@ -12,15 +12,15 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
 from sqlalchemy import select
 
 from api.core.config import settings
-from api.core.database import get_db_session
-from api.models.db import Decision, Document, DocumentStatus, Webhook
+from api.core.database import SyncSessionLocal
+from api.models.db import AuditLog, Decision, Document, DocumentStatus, Webhook
 from workers.celery_app import celery_app
 
 
@@ -31,26 +31,19 @@ def write_audit_event(
     actor: str = "system",
     payload: dict | None = None,
 ) -> None:
-    """Write audit event from async worker context."""
-    import asyncio
-
-    async def _write():
-        from api.core.audit import write_audit
-        session = await get_db_session()
-        try:
-            await write_audit(
-                session,
-                uuid.UUID(tenant_id),
-                event,
-                document_id=uuid.UUID(document_id) if document_id else None,
-                actor=actor,
-                payload=payload,
-            )
-            await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_write())
+    """Write audit event from sync worker context."""
+    session = SyncSessionLocal()
+    try:
+        session.add(AuditLog(
+            tenant_id=uuid.UUID(tenant_id),
+            document_id=uuid.UUID(document_id) if document_id else None,
+            actor=actor,
+            event=event,
+            payload=payload,
+        ))
+        session.commit()
+    finally:
+        session.close()
 
 logger = logging.getLogger(__name__)
 
@@ -118,29 +111,20 @@ def handle_review(
     )
 
     try:
-        import asyncio
+        _session = SyncSessionLocal()
+        try:
+            doc = _session.execute(
+                select(Document).where(Document.id == uuid.UUID(document_id))
+            ).scalar_one_or_none()
 
-        async def _load():
-            session = await get_db_session()
-            try:
-                doc_result = await session.execute(
-                    select(Document).where(Document.id == uuid.UUID(document_id))
+            webhooks = list(_session.execute(
+                select(Webhook).where(
+                    Webhook.tenant_id == uuid.UUID(tenant_id),
+                    Webhook.is_active.is_(True),
                 )
-                doc = doc_result.scalar_one_or_none()
-
-                webhooks_result = await session.execute(
-                    select(Webhook).where(
-                        Webhook.tenant_id == uuid.UUID(tenant_id),
-                        Webhook.is_active.is_(True),
-                    )
-                )
-                webhooks = webhooks_result.scalars().all()
-
-                return doc, list(webhooks)
-            finally:
-                await session.close()
-
-        doc, webhooks = asyncio.run(_load())
+            ).scalars().all())
+        finally:
+            _session.close()
 
         if not doc:
             logger.warning(f"Document {document_id} not found in review handler")
@@ -159,7 +143,7 @@ def handle_review(
             "decision": decision,
             "document_type": doc.document_type.value if doc.document_type else None,
             "filename": doc.original_filename,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         # Dispatch webhooks that subscribed to this event type
@@ -202,23 +186,17 @@ def escalate_stale_reviews(stale_hours: int = 24) -> dict[str, Any]:
     This task is intended to be called periodically via Celery Beat.
     It re-dispatches webhook events for stale review documents.
     """
-    import asyncio
-
-    async def _find_stale():
-        session = await get_db_session()
-        try:
-            cutoff = datetime.utcnow() - timedelta(hours=stale_hours)
-            result = await session.execute(
-                select(Document).where(
-                    Document.status.in_([DocumentStatus.REVIEW, DocumentStatus.MANUAL_REVIEW]),
-                    Document.processing_completed_at <= cutoff,
-                )
+    _session = SyncSessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_hours)
+        stale_docs = list(_session.execute(
+            select(Document).where(
+                Document.status.in_([DocumentStatus.REVIEW, DocumentStatus.MANUAL_REVIEW]),
+                Document.processing_completed_at <= cutoff,
             )
-            return result.scalars().all()
-        finally:
-            await session.close()
-
-    stale_docs = asyncio.run(_find_stale())
+        ).scalars().all())
+    finally:
+        _session.close()
     escalated = 0
     for doc in stale_docs:
         handle_review.apply_async(

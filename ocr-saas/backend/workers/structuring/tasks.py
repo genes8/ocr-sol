@@ -10,11 +10,11 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
-from api.core.database import get_db_session
+from api.core.database import SyncSessionLocal
 from api.models.db import (
+    AuditLog,
     Document,
     DocumentStatus,
     DocumentType,
@@ -33,26 +33,19 @@ def write_audit_event(
     actor: str = "system",
     payload: dict | None = None,
 ) -> None:
-    """Write audit event from async worker context."""
-    import asyncio
-
-    async def _write():
-        from api.core.audit import write_audit
-        session = await get_db_session()
-        try:
-            await write_audit(
-                session,
-                uuid.UUID(tenant_id),
-                event,
-                document_id=uuid.UUID(document_id) if document_id else None,
-                actor=actor,
-                payload=payload,
-            )
-            await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_write())
+    """Write audit event from sync worker context."""
+    session = SyncSessionLocal()
+    try:
+        session.add(AuditLog(
+            tenant_id=uuid.UUID(tenant_id),
+            document_id=uuid.UUID(document_id) if document_id else None,
+            actor=actor,
+            event=event,
+            payload=payload,
+        ))
+        session.commit()
+    finally:
+        session.close()
 
 logger = logging.getLogger(__name__)
 
@@ -69,23 +62,18 @@ def update_document_status(
     error_message: str | None = None,
 ) -> None:
     """Update document status in database."""
-    import asyncio
-
-    async def _update():
-        session = await get_db_session()
-        try:
-            result = await session.execute(
-                select(Document).where(Document.id == uuid.UUID(document_id))
-            )
-            doc = result.scalar_one_or_none()
-            if doc:
-                doc.status = status
-                doc.error_message = error_message
-                await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_update())
+    session = SyncSessionLocal()
+    try:
+        result = session.execute(
+            select(Document).where(Document.id == uuid.UUID(document_id))
+        )
+        doc = result.scalar_one_or_none()
+        if doc:
+            doc.status = status
+            doc.error_message = error_message
+            session.commit()
+    finally:
+        session.close()
 
 
 def load_schema(document_type: DocumentType) -> dict[str, Any]:
@@ -301,7 +289,7 @@ def normalize_extracted_data(
     return data
 
 
-async def save_structured_result(
+def save_structured_result(
     document_id: str,
     document_type: DocumentType,
     extracted_data: dict[str, Any],
@@ -315,7 +303,7 @@ async def save_structured_result(
     Returns:
         Structured result ID
     """
-    session = await get_db_session()
+    session = SyncSessionLocal()
     try:
         new_id = uuid.uuid4()
         stmt = (
@@ -345,11 +333,11 @@ async def save_structured_result(
             )
             .returning(StructuredResult.id)
         )
-        result = await session.execute(stmt)
-        await session.commit()
+        result = session.execute(stmt)
+        session.commit()
         return str(result.scalar_one())
     finally:
-        await session.close()
+        session.close()
 
 
 @celery_app.task(bind=True, name="workers.structuring.tasks.extract_structure")
@@ -376,41 +364,33 @@ def extract_structure(self, document_id: str, tenant_id: str, priority: int = 5)
     try:
         update_document_status(document_id, DocumentStatus.STRUCTURING)
 
-        import asyncio
+        _session = SyncSessionLocal()
+        try:
+            _doc_result = _session.execute(
+                select(Document).where(Document.id == uuid.UUID(document_id))
+            )
+            doc = _doc_result.scalar_one_or_none()
 
-        async def _get_doc_and_ocr():
-            session = await get_db_session()
-            try:
-                doc_result = await session.execute(
-                    select(Document).where(Document.id == uuid.UUID(document_id))
+            if not doc or not doc.document_type:
+                raise ValueError(f"Document {document_id} not found or not classified")
+
+            _ocr_result = _session.execute(
+                select(OCRResult).where(
+                    OCRResult.document_id == uuid.UUID(document_id)
                 )
-                doc = doc_result.scalar_one_or_none()
+            )
+            ocr_result = _ocr_result.scalar_one_or_none()
 
-                if not doc or not doc.document_type:
-                    raise ValueError(f"Document {document_id} not found or not classified")
+            if not ocr_result:
+                raise ValueError(f"No OCR result for document {document_id}")
 
-                ocr_result = await session.execute(
-                    select(OCRResult).where(
-                        OCRResult.document_id == uuid.UUID(document_id)
-                    )
-                )
-                ocr = ocr_result.scalar_one_or_none()
-
-                if not ocr:
-                    raise ValueError(f"No OCR result for document {document_id}")
-
-                # Load tenant settings for per-tenant routing (Task P1.15)
-                tenant_result = await session.execute(
-                    select(Tenant).where(Tenant.id == doc.tenant_id)
-                )
-                tenant = tenant_result.scalar_one_or_none()
-                tenant_settings = (tenant.settings or {}) if tenant else {}
-
-                return doc, ocr, tenant_settings
-            finally:
-                await session.close()
-
-        doc, ocr_result, tenant_settings = asyncio.run(_get_doc_and_ocr())
+            _tenant_result = _session.execute(
+                select(Tenant).where(Tenant.id == doc.tenant_id)
+            )
+            tenant = _tenant_result.scalar_one_or_none()
+            tenant_settings = (tenant.settings or {}) if tenant else {}
+        finally:
+            _session.close()
 
         # Per-tenant schema/prompt routing
         # tenant.settings.schema_overrides: {"invoice": {...schema...}, ...}
@@ -438,7 +418,7 @@ def extract_structure(self, document_id: str, tenant_id: str, priority: int = 5)
 
         processing_time_ms = int((time.time() - start_time) * 1000)
 
-        asyncio.run(save_structured_result(
+        save_structured_result(
             document_id=document_id,
             document_type=doc.document_type,
             extracted_data=normalized_data,
@@ -446,7 +426,7 @@ def extract_structure(self, document_id: str, tenant_id: str, priority: int = 5)
             raw_llm_response=json.dumps(extraction),
             processing_time_ms=processing_time_ms,
             bbox_evidence=extraction.get("bbox_evidence"),
-        ))
+        )
 
         if doc.document_type in LINE_ITEM_TYPES:
             update_document_status(document_id, DocumentStatus.RECONCILIATION)

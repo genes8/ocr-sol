@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from typing import Literal
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Secrets that must never be defaults in production
@@ -112,11 +113,23 @@ class Settings(BaseSettings):
     ENABLE_LLM_STRUCTURING: bool = True
     ENABLE_RECONCILIATION: bool = True
 
-    # CORS
+    # CORS — must be explicitly configured via CORS_ORIGINS env var in production.
+    # Accepts a JSON list or a comma-separated string of origins.
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: list[str] = ["*"]
     CORS_ALLOW_HEADERS: list[str] = ["*"]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: object) -> list[str]:
+        """Allow comma-separated string as well as JSON list from env."""
+        if isinstance(v, str) and not v.startswith("["):
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v  # type: ignore[return-value]
+
+    # Presigned URL expiry for MinIO document access
+    PRESIGNED_URL_EXPIRY_SECONDS: int = 3600
 
     def validate_production_secrets(self) -> None:
         """Fail fast if insecure default secrets are used in production."""

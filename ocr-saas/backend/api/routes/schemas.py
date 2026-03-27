@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
 
 
 class TenantCreate(BaseModel):
@@ -266,10 +266,24 @@ class SupplierListResponse(BaseModel):
     items: list[SupplierResponse]
 
 
+class TenantSettings(BaseModel):
+    """Validated tenant settings — rejects unknown keys."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_documents_per_month: int | None = None
+    max_concurrent_processing: int | None = None
+    allowed_document_types: list[str] | None = None
+    confidence_thresholds: dict[str, float] | None = None
+    plan: str | None = None
+    schema_overrides: dict[str, Any] | None = None
+    system_prompt: str | None = None
+
+
 class TenantSettingsUpdate(BaseModel):
     """Schema for updating tenant settings (e.g. plan)."""
 
-    settings: dict[str, Any]
+    settings: TenantSettings
 
 
 class FieldCorrectionRequest(BaseModel):

@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import cv2
@@ -17,9 +17,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from api.core.config import settings
-from api.core.database import SyncSessionLocal, get_db_session
+from api.core.database import SyncSessionLocal
 from api.core.storage import get_minio_client, upload_thumbnail
-from api.models.db import Document, DocumentFile, DocumentStatus
+from api.models.db import AuditLog, Document, DocumentFile, DocumentStatus
 from workers.celery_app import celery_app
 
 
@@ -31,26 +31,18 @@ def write_audit_event(
     payload: dict | None = None,
 ) -> None:
     """Write audit event from sync worker context."""
-    import asyncio
-
-    async def _write():
-        from api.core.audit import write_audit
-        import uuid as _uuid
-        session = await get_db_session()
-        try:
-            await write_audit(
-                session,
-                _uuid.UUID(tenant_id),
-                event,
-                document_id=_uuid.UUID(document_id) if document_id else None,
-                actor=actor,
-                payload=payload,
-            )
-            await session.commit()
-        finally:
-            await session.close()
-
-    asyncio.run(_write())
+    session = SyncSessionLocal()
+    try:
+        session.add(AuditLog(
+            tenant_id=uuid.UUID(tenant_id),
+            document_id=uuid.UUID(document_id) if document_id else None,
+            actor=actor,
+            event=event,
+            payload=payload,
+        ))
+        session.commit()
+    finally:
+        session.close()
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +68,7 @@ def update_document_status(
             doc.status = status
             doc.error_message = error_message
             if status == DocumentStatus.PREPROCESSING:
-                doc.processing_started_at = datetime.utcnow()
+                doc.processing_started_at = datetime.now(timezone.utc)
             session.commit()
     finally:
         session.close()

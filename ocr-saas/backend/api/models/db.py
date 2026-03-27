@@ -1,7 +1,7 @@
 """SQLAlchemy database models for OCR SaaS."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum as PyEnum
 from typing import Any
 
@@ -79,10 +79,10 @@ class Tenant(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     settings: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
 
     documents: Mapped[list["Document"]] = relationship(
@@ -120,7 +120,7 @@ class APIKey(Base):
     # admin: full access; reviewer: review + field corrections; readonly: GET only
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="admin")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="api_keys")
@@ -165,15 +165,15 @@ class Document(Base):
     )
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="documents")
     files: Mapped[list["DocumentFile"]] = relationship(
-        "DocumentFile", back_populates="document", lazy="selectin"
+        "DocumentFile", back_populates="document", lazy="selectin", cascade="all, delete-orphan"
     )
     ocr_result: Mapped["OCRResult | None"] = relationship(
         "OCRResult", back_populates="document", uselist=False
@@ -207,7 +207,7 @@ class DocumentFile(Base):
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
     document: Mapped["Document"] = relationship("Document", back_populates="files")
@@ -234,7 +234,7 @@ class OCRResult(Base):
     processing_time_ms: Mapped[int | None] = mapped_column(Integer)
     model_version: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
     document: Mapped["Document"] = relationship("Document", back_populates="ocr_result")
@@ -266,7 +266,7 @@ class StructuredResult(Base):
     # Feature 4: supplier lookup result from validation worker
     supplier_lookup_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
     document: Mapped["Document"] = relationship(
@@ -303,7 +303,7 @@ class ReconciliationLog(Base):
     discrepancy_details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     processing_time_ms: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
     document: Mapped["Document"] = relationship(
@@ -334,10 +334,10 @@ class Webhook(Base):
     retry_count: Mapped[int] = mapped_column(Integer, default=3)
     retry_delay_seconds: Mapped[int] = mapped_column(Integer, default=60)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="webhooks")
@@ -365,10 +365,10 @@ class Supplier(Base):
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="suppliers")
@@ -391,7 +391,7 @@ class AuditLog(Base):
     event: Mapped[str] = mapped_column(String(100), nullable=False)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -418,5 +418,5 @@ class WebhookDelivery(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

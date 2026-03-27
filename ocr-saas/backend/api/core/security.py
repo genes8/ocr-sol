@@ -125,6 +125,8 @@ async def _resolve_auth(
         )
         api_key_obj = result.scalar_one_or_none()
         if api_key_obj:
+            if api_key_obj.expires_at and api_key_obj.expires_at < datetime.now(timezone.utc):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key expired")
             return api_key_obj.tenant_id, api_key_obj.role
 
     if authorization:

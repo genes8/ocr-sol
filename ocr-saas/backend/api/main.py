@@ -1,8 +1,11 @@
 """OCR SaaS API - FastAPI Main Application."""
 
+import logging
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -65,12 +68,10 @@ app.add_middleware(
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle uncaught exceptions."""
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={
-            "detail": "Internal server error",
-            "type": type(exc).__name__,
-        },
+        content={"detail": "Internal server error"},
     )
 
 
