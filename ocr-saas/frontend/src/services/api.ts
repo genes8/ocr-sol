@@ -3,6 +3,9 @@ import toast from "react-hot-toast";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
+let isRefreshing = false;
+let pendingRequests: Array<(token: string) => void> = [];
+
 export const api = axios.create({
   baseURL: `${API_BASE_URL}/api/v1`,
   timeout: 30000,
@@ -28,8 +31,23 @@ api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     if (error.response?.status === 401) {
+      if (error.config?.url?.includes('/auth/refresh')) {
+        localStorage.removeItem("access_token");
+        localStorage.removeItem("refresh_token");
+        window.location.href = "/login";
+        return Promise.reject(error);
+      }
       const refreshToken = localStorage.getItem("refresh_token");
       if (refreshToken) {
+        if (isRefreshing) {
+          return new Promise((resolve) => {
+            pendingRequests.push((token: string) => {
+              error.config!.headers!.Authorization = `Bearer ${token}`;
+              resolve(axios(error.config!));
+            });
+          });
+        }
+        isRefreshing = true;
         try {
           const response = await axios.post(`${API_BASE_URL}/api/v1/auth/refresh`, {
             refresh_token: refreshToken,
@@ -37,16 +55,17 @@ api.interceptors.response.use(
           const { access_token, refresh_token: newRefresh } = response.data;
           localStorage.setItem("access_token", access_token);
           localStorage.setItem("refresh_token", newRefresh);
-          
-          // Retry original request
-          if (error.config && error.config.headers) {
-            error.config.headers.Authorization = `Bearer ${access_token}`;
-            return axios(error.config);
-          }
+          pendingRequests.forEach((cb) => cb(access_token));
+          pendingRequests = [];
+          error.config!.headers!.Authorization = `Bearer ${access_token}`;
+          return axios(error.config!);
         } catch {
+          pendingRequests = [];
           localStorage.removeItem("access_token");
           localStorage.removeItem("refresh_token");
           window.location.href = "/login";
+        } finally {
+          isRefreshing = false;
         }
       } else {
         window.location.href = "/login";
