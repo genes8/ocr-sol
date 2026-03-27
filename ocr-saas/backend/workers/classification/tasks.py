@@ -61,6 +61,13 @@ CLASSIFICATION_PATTERNS = {
             r"\bpib\b",
             r"\bukupno\b",  # total
             r"\biznos\b",  # amount
+            # Cyrillic equivalents
+            r"\bрачун\b",
+            r"\bфактура\b",
+            r"\bПДВ\b",
+            r"\bукупно\b",
+            r"\bизнос\b",
+            r"\bпорески\b",
         ],
         "weight": 1.0,
     },
@@ -72,6 +79,9 @@ CLASSIFICATION_PATTERNS = {
             r"\bproposal\b",
             r"\bquote\b",
             r"\bpribilješka\b",
+            # Cyrillic
+            r"\bпонуда\b",
+            r"\bпрофорна\b",
         ],
         "weight": 0.9,
     },
@@ -84,6 +94,9 @@ CLASSIFICATION_PATTERNS = {
             r"\bshipping\b",
             r"\bdelivery\s+order\b",
             r"\btrucking\s+note\b",
+            # Cyrillic
+            r"\bотпремница\b",
+            r"\bдоставница\b",
         ],
         "weight": 0.9,
     },
@@ -96,6 +109,11 @@ CLASSIFICATION_PATTERNS = {
             r"\bsporazum\b",
             r"\bzakup\b",  # lease
             r"\bnajam\b",  # rental
+            # Cyrillic
+            r"\bуговор\b",
+            r"\bспоразум\b",
+            r"\bзакуп\b",
+            r"\bнајам\b",
         ],
         "weight": 0.85,
     },
@@ -109,6 +127,13 @@ CLASSIFICATION_PATTERNS = {
             r"\bstanje\b",  # balance
             r"\bUplatnica\b",
             r"\bIsplatnica\b",
+            # Cyrillic
+            r"\bизвод\b",
+            r"\bбанка\b",
+            r"\bпромет\b",
+            r"\bстање\b",
+            r"\bуплатница\b",
+            r"\bисплатница\b",
         ],
         "weight": 0.85,
     },
@@ -121,6 +146,12 @@ CLASSIFICATION_PATTERNS = {
             r"\bcertificate\b",
             r"\bpotvrda\b",  # certificate
             r"\bovlascenje\b",  # authorization
+            # Cyrillic
+            r"\bрешење\b",
+            r"\bзаписник\b",
+            r"\bобразац\b",
+            r"\bпотврда\b",
+            r"\bовлашћење\b",
         ],
         "weight": 0.8,
     },

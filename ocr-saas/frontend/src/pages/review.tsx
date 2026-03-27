@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { useParams } from "react-router-dom";
+import toast from "react-hot-toast";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -118,16 +119,26 @@ export function Review() {
 
   const handleApprove = async () => {
     if (!id) return;
-    await documentsApi.update(id, { decision: "auto" });
-    refetchDoc();
-    refetchList();
+    try {
+      await documentsApi.update(id, { decision: "auto" });
+      toast.success("Document approved");
+      refetchDoc();
+      refetchList();
+    } catch (e) {
+      toast.error("Approve failed: " + (e instanceof Error ? e.message : "Unknown error"));
+    }
   };
 
   const handleReject = async () => {
     if (!id) return;
-    await documentsApi.update(id, { decision: "manual" });
-    refetchDoc();
-    refetchList();
+    try {
+      await documentsApi.update(id, { decision: "manual" });
+      toast.success("Document rejected — moved to manual review");
+      refetchDoc();
+      refetchList();
+    } catch (e) {
+      toast.error("Reject failed: " + (e instanceof Error ? e.message : "Unknown error"));
+    }
   };
 
   const handleFieldUpdate = useCallback(async (key: string, value: unknown) => {
@@ -348,14 +359,34 @@ export function Review() {
           />
         </div>
 
-        {/* Field editor */}
-        <div className="w-96 bg-gray-50 border-l border-gray-200 overflow-hidden">
-          <FieldEditor
-            fields={fields}
-            onFieldUpdate={handleFieldUpdate}
-            onFieldSelect={handleFieldSelect}
-            selectedField={selectedField}
-          />
+        {/* Field editor / OCR fallback */}
+        <div className="w-96 bg-gray-50 border-l border-gray-200 overflow-hidden flex flex-col">
+          {fields.length > 0 ? (
+            <FieldEditor
+              fields={fields}
+              onFieldUpdate={handleFieldUpdate}
+              onFieldSelect={handleFieldSelect}
+              selectedField={selectedField}
+            />
+          ) : (
+            <div className="flex flex-col h-full overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-200 bg-white">
+                <h2 className="text-sm font-semibold text-gray-900">OCR Text</h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  No structured data — document routed to manual review
+                </p>
+              </div>
+              <div className="flex-1 overflow-y-auto p-4">
+                {documentResult.ocr_result?.full_text ? (
+                  <pre className="text-xs text-gray-700 whitespace-pre-wrap font-mono leading-relaxed">
+                    {documentResult.ocr_result.full_text}
+                  </pre>
+                ) : (
+                  <p className="text-sm text-gray-400 text-center mt-8">No OCR text extracted.</p>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

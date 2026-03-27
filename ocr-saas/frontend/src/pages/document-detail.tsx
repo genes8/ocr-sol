@@ -51,18 +51,18 @@ export function DocumentDetail() {
 
         <div className="mt-6 grid grid-cols-3 gap-4">
           <div className="p-4 bg-gray-50 rounded-lg">
-            <p className="text-sm text-gray-500">Status</p>
-            <p className="mt-1 font-medium capitalize">{doc.status.replace("_", " ")}</p>
+            <p className="text-sm font-medium text-gray-500">Status</p>
+            <p className="mt-1 font-semibold text-gray-900 capitalize">{doc.status.replace("_", " ")}</p>
           </div>
           <div className="p-4 bg-gray-50 rounded-lg">
-            <p className="text-sm text-gray-500">Document Type</p>
-            <p className="mt-1 font-medium capitalize">
+            <p className="text-sm font-medium text-gray-500">Document Type</p>
+            <p className="mt-1 font-semibold text-gray-900 capitalize">
               {doc.document_type?.replace("_", " ") || "Unknown"}
             </p>
           </div>
           <div className="p-4 bg-gray-50 rounded-lg">
-            <p className="text-sm text-gray-500">Decision</p>
-            <p className="mt-1 font-medium capitalize">{doc.decision || "Pending"}</p>
+            <p className="text-sm font-medium text-gray-500">Decision</p>
+            <p className="mt-1 font-semibold text-gray-900 capitalize">{doc.decision || "Pending"}</p>
           </div>
         </div>
 

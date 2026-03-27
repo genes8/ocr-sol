@@ -426,7 +426,12 @@ async def get_document_result(
             detail="Document not found",
         )
 
-    if document.status != DocumentStatus.COMPLETED and document.status != DocumentStatus.REVIEW:
+    viewable_statuses = {
+        DocumentStatus.COMPLETED,
+        DocumentStatus.REVIEW,
+        DocumentStatus.MANUAL_REVIEW,
+    }
+    if document.status not in viewable_statuses:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Document processing not completed. Current status: {document.status.value}",

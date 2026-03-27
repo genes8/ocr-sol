@@ -151,7 +151,6 @@ def pdf_to_images(pdf_bytes: bytes, dpi: int = 200) -> list[Image.Image]:
             dpi=dpi,
             poppler_path=poppler_path,
             fmt="jpeg",
-            jpeg_quality=95,
             thread_count=1,  # Single thread to avoid memory issues
             strict=False,
         )

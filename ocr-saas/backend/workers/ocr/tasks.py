@@ -250,11 +250,12 @@ def fallback_ocr(image: Image.Image) -> dict[str, Any]:
             tmp_path = tmp.name
         
         try:
-            # Run Tesseract OCR with English
-            text = pytesseract.image_to_string(tmp_path, lang='eng')
+            # Run Tesseract OCR with Serbian (Cyrillic + Latin) + English
+            lang = 'srp+srp_latn+eng'
+            text = pytesseract.image_to_string(tmp_path, lang=lang)
             data = pytesseract.image_to_data(
                 tmp_path,
-                lang='eng',
+                lang=lang,
                 output_type=pytesseract.Output.DICT,
             )
         finally:
