@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
@@ -271,11 +271,11 @@ class TenantSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_documents_per_month: int | None = None
-    max_concurrent_processing: int | None = None
+    max_documents_per_month: int | None = Field(default=None, gt=0)
+    max_concurrent_processing: int | None = Field(default=None, gt=0)
     allowed_document_types: list[str] | None = None
-    confidence_thresholds: dict[str, float] | None = None
-    plan: str | None = None
+    confidence_thresholds: dict[str, Annotated[float, Field(ge=0.0, le=1.0)]] | None = None
+    plan: Literal["free", "standard", "enterprise"] | None = None
     schema_overrides: dict[str, Any] | None = None
     system_prompt: str | None = None
 

@@ -117,8 +117,8 @@ class Settings(BaseSettings):
     # Accepts a JSON list or a comma-separated string of origins.
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
     CORS_ALLOW_CREDENTIALS: bool = True
-    CORS_ALLOW_METHODS: list[str] = ["*"]
-    CORS_ALLOW_HEADERS: list[str] = ["*"]
+    CORS_ALLOW_METHODS: list[str] = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
+    CORS_ALLOW_HEADERS: list[str] = ["Authorization", "Content-Type", "X-API-Key"]
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -129,7 +129,7 @@ class Settings(BaseSettings):
         return v  # type: ignore[return-value]
 
     # Presigned URL expiry for MinIO document access
-    PRESIGNED_URL_EXPIRY_SECONDS: int = 3600
+    PRESIGNED_URL_EXPIRY_SECONDS: int = 900
 
     def validate_production_secrets(self) -> None:
         """Fail fast if insecure default secrets are used in production."""

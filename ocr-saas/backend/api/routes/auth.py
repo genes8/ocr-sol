@@ -285,7 +285,7 @@ async def update_tenant_settings(
 
     # Merge incoming settings with existing ones
     current = dict(tenant.settings or {})
-    current.update(data.settings)
+    current.update(data.settings.model_dump(exclude_none=True))
     tenant.settings = current
 
     await db.commit()
