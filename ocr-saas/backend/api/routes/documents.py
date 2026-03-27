@@ -553,18 +553,24 @@ async def update_document_fields(
     """Apply field-level corrections to extracted data."""
     import copy
 
-    query = select(Document).where(
-        Document.id == document_id,
-        Document.tenant_id == tenant_id,
-    ).options(selectinload(Document.structured_result))
-
-    result = await db.execute(query)
-    document = result.scalar_one_or_none()
+    doc_result = await db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.tenant_id == tenant_id,
+        ).with_for_update()
+    )
+    document = doc_result.scalar_one_or_none()
 
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    structured_result = document.structured_result
+    sr_result = await db.execute(
+        select(StructuredResult).where(
+            StructuredResult.document_id == document_id
+        ).with_for_update()
+    )
+    structured_result = sr_result.scalar_one_or_none()
+
     if not structured_result:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -703,8 +709,8 @@ async def delete_document(
                 bucket_name=settings.MINIO_BUCKET_DOCUMENTS,
                 object_name=file.minio_path,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("MinIO delete failed for %s: %s", file.minio_path, e)
 
     await db.delete(document)
     await db.commit()
