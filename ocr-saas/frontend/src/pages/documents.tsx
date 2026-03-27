@@ -1,7 +1,28 @@
 import { useQuery } from "@tanstack/react-query";
-import { FileText, Link as LinkIcon } from "lucide-react";
+import { FileText } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { documentsApi } from "../services/api";
+
+const STATUS_LABEL_MAP: Record<string, { label: string; className: string }> = {
+  completed: { label: "Completed", className: "bg-green-100 text-green-800" },
+  failed: { label: "Failed", className: "bg-red-100 text-red-800" },
+  review: { label: "Needs Review", className: "bg-yellow-100 text-yellow-800" },
+  manual_review: { label: "Needs Review", className: "bg-yellow-100 text-yellow-800" },
+  in_progress: { label: "In Progress", className: "bg-blue-100 text-blue-800" },
+  pending: { label: "Pending", className: "bg-gray-100 text-gray-800" },
+};
+
+function statusBadge(status: string) {
+  const { label, className } = STATUS_LABEL_MAP[status] ?? {
+    label: status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+    className: "bg-gray-100 text-gray-800",
+  };
+  return (
+    <span className={`px-2 py-1 text-xs rounded-full font-medium ${className}`}>
+      {label}
+    </span>
+  );
+}
 
 export function Documents() {
   const navigate = useNavigate();
@@ -30,6 +51,7 @@ export function Documents() {
         </div>
       ) : (
         <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
@@ -73,9 +95,7 @@ export function Documents() {
                     </span>
                   </td>
                   <td className="px-6 py-4">
-                    <span className="px-2 py-1 text-xs bg-gray-100 text-gray-800 rounded-full">
-                      {doc.status}
-                    </span>
+                    {statusBadge(doc.status)}
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-500">
                     {new Date(doc.created_at).toLocaleDateString()}
@@ -84,6 +104,7 @@ export function Documents() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>
