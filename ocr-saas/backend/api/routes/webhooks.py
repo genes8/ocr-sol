@@ -41,6 +41,15 @@ WEBHOOK_EVENTS = [
 ]
 
 
+def _validate_webhook_events(events: list[str]) -> None:
+    for event in events:
+        if event not in WEBHOOK_EVENTS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid event type: {event}. Valid events: {WEBHOOK_EVENTS}",
+            )
+
+
 def generate_signature(payload: str, secret: str) -> str:
     """Generate HMAC-SHA256 signature for webhook payload."""
     return hmac.new(
@@ -121,12 +130,7 @@ async def create_webhook(
     tenant_id: uuid.UUID = Depends(get_current_tenant),
 ) -> WebhookResponse:
     """Create a new webhook."""
-    for event in data.events:
-        if event not in WEBHOOK_EVENTS:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid event type: {event}. Valid events: {WEBHOOK_EVENTS}",
-            )
+    _validate_webhook_events(data.events)
 
     secret = f"whsec_{uuid.uuid4().hex}{uuid.uuid4().hex[:16]}"
 
@@ -212,12 +216,7 @@ async def update_webhook(
             detail="Webhook not found",
         )
 
-    for event in data.events:
-        if event not in WEBHOOK_EVENTS:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid event type: {event}",
-            )
+    _validate_webhook_events(data.events)
 
     webhook.name = data.name
     webhook.url = str(data.url)

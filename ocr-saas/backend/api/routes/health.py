@@ -1,8 +1,11 @@
 """Health check API routes."""
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, status
+
+logger = logging.getLogger(__name__)
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -63,8 +66,8 @@ async def health_check() -> HealthResponse:
             services["review_queue_depth"] = str(depth)
         finally:
             await session.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to get review queue depth: %s", e)
 
     overall = "healthy" if all(v == "ok" for v in services.values() if not v.startswith("error")) else "degraded"
 

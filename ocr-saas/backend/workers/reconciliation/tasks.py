@@ -88,7 +88,8 @@ def parse_amount(value: Any) -> Decimal | None:
 
         try:
             return Decimal(cleaned)
-        except Exception:
+        except Exception as e:
+            logger.debug("Amount parse failed for %r: %s", value, e)
             return None
 
     return None
