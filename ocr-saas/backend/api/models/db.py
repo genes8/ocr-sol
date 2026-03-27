@@ -86,16 +86,16 @@ class Tenant(Base):
     )
 
     documents: Mapped[list["Document"]] = relationship(
-        "Document", back_populates="tenant", lazy="selectin"
+        "Document", back_populates="tenant", lazy="raise_on_sql"
     )
     api_keys: Mapped[list["APIKey"]] = relationship(
-        "APIKey", back_populates="tenant", lazy="selectin"
+        "APIKey", back_populates="tenant", lazy="raise_on_sql"
     )
     webhooks: Mapped[list["Webhook"]] = relationship(
-        "Webhook", back_populates="tenant", lazy="selectin"
+        "Webhook", back_populates="tenant", lazy="raise_on_sql"
     )
     suppliers: Mapped[list["Supplier"]] = relationship(
-        "Supplier", back_populates="tenant", lazy="selectin"
+        "Supplier", back_populates="tenant", lazy="raise_on_sql"
     )
 
 
