@@ -48,15 +48,30 @@ def write_audit_event(
 logger = logging.getLogger(__name__)
 
 
-def _dispatch_webhook(
-    webhook: Webhook,
+@celery_app.task(
+    bind=True,
+    name="workers.review.tasks.deliver_webhook",
+    max_retries=3,
+    default_retry_delay=30,
+)
+def deliver_webhook(
+    self,
+    webhook_id: str,
+    webhook_url: str,
+    webhook_secret: str,
+    webhook_headers: dict,
     event_type: str,
     payload: dict[str, Any],
 ) -> bool:
-    """Send a single webhook delivery. Returns True on success."""
+    """Send a single webhook delivery as an isolated Celery task.
+
+    Extracted from handle_review so that slow/failing webhook endpoints
+    do not block the review handler or consume the task's time budget.
+    Returns True on success, retries on failure.
+    """
     body = json.dumps(payload, default=str)
     signature = hmac.new(
-        webhook.secret.encode(),
+        webhook_secret.encode(),
         body.encode(),
         hashlib.sha256,
     ).hexdigest()
@@ -65,25 +80,27 @@ def _dispatch_webhook(
         "Content-Type": "application/json",
         "X-OCR-Signature": f"sha256={signature}",
         "X-OCR-Event": event_type,
-        **(webhook.headers or {}),
+        **(webhook_headers or {}),
     }
 
     try:
         resp = requests.post(
-            str(webhook.url),
+            webhook_url,
             data=body,
             headers=headers,
             timeout=15,
         )
         resp.raise_for_status()
         logger.info(
-            f"Webhook {webhook.id} delivered event={event_type} "
-            f"status={resp.status_code}"
+            "Webhook %s delivered event=%s status=%s",
+            webhook_id,
+            event_type,
+            resp.status_code,
         )
         return True
     except Exception as exc:
-        logger.warning(f"Webhook {webhook.id} delivery failed: {exc}")
-        return False
+        logger.warning("Webhook %s delivery failed: %s — retrying", webhook_id, exc)
+        raise self.retry(exc=exc)
 
 
 @celery_app.task(bind=True, name="workers.review.tasks.handle_review")
@@ -146,12 +163,22 @@ def handle_review(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        # Dispatch webhooks that subscribed to this event type
+        # Dispatch each matching webhook as an independent Celery task so that
+        # slow or failing endpoints do not block the review handler.
         dispatched = 0
         for webhook in webhooks:
             subscribed_events = webhook.events or []
             if event_type in subscribed_events or "document.*" in subscribed_events:
-                _dispatch_webhook(webhook, event_type, webhook_payload)
+                deliver_webhook.apply_async(
+                    kwargs={
+                        "webhook_id": str(webhook.id),
+                        "webhook_url": str(webhook.url),
+                        "webhook_secret": webhook.secret,
+                        "webhook_headers": dict(webhook.headers or {}),
+                        "event_type": event_type,
+                        "payload": webhook_payload,
+                    },
+                )
                 dispatched += 1
 
         processing_time = time.time() - start_time

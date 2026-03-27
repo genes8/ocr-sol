@@ -67,7 +67,18 @@ def update_document_status(
 
 
 def parse_amount(value: Any) -> Decimal | None:
-    """Parse amount from various formats."""
+    """Parse amount from various formats.
+
+    Handles common locale formats:
+    - European: 1.234,56 → 1234.56
+    - US: 1,234.56 → 1234.56
+    - Bare comma decimal: 1,56 → 1.56 (2 decimal digits)
+    - Bare dot decimal: 1.56 → 1.56
+
+    Ambiguous case: "1.234" (no comma) is parsed as 1.234, not 1234.
+    Caller should be aware that 4-digit values like "1.234" may be
+    European thousands-separated and could be misread.
+    """
     if value is None:
         return None
 
@@ -75,21 +86,52 @@ def parse_amount(value: Any) -> Decimal | None:
         return Decimal(str(value))
 
     if isinstance(value, str):
-        cleaned = value.replace("€", "").replace("$", "").replace("RSD", "")
-        cleaned = cleaned.replace(" ", "").replace("\xa0", "")
+        # Strip currency symbols and whitespace
+        cleaned = (
+            value
+            .replace("€", "").replace("$", "").replace("£", "")
+            .replace("RSD", "").replace("din", "").replace("din.", "")
+            .strip()
+            .replace(" ", "").replace("\xa0", "").replace("\u202f", "")
+        )
+
+        if not cleaned:
+            return None
+
         if "," in cleaned and "." in cleaned:
+            # Both separators present → European format: 1.234,56
             cleaned = cleaned.replace(".", "").replace(",", ".")
         elif "," in cleaned:
             parts = cleaned.split(",")
-            if len(parts[-1]) == 2:
+            last = parts[-1]
+            if len(last) == 2:
+                # Comma is decimal separator: 1,56 → 1.56
                 cleaned = cleaned.replace(",", ".")
-            else:
+            elif len(last) == 3:
+                # Comma is thousands separator: 1,234 → 1234
                 cleaned = cleaned.replace(",", "")
+            else:
+                # Ambiguous — log and try removing comma as thousands separator
+                logger.warning(
+                    "Ambiguous amount format %r — treating comma as thousands separator",
+                    value,
+                )
+                cleaned = cleaned.replace(",", "")
+        elif "." in cleaned:
+            parts = cleaned.split(".")
+            last = parts[-1]
+            if len(last) == 3 and len(parts) > 1:
+                # European thousands dot: 1.234 or 1.234.567
+                logger.warning(
+                    "Ambiguous amount format %r — could be European thousands dot; "
+                    "treating as decimal",
+                    value,
+                )
 
         try:
             return Decimal(cleaned)
         except Exception as e:
-            logger.debug("Amount parse failed for %r: %s", value, e)
+            logger.warning("Amount parse failed for %r: %s", value, e)
             return None
 
     return None
