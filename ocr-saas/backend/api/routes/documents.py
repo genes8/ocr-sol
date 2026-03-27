@@ -594,6 +594,11 @@ async def update_document_fields(
 
     MAX_FIELD_DEPTH = 4
     for field_path, value in data.fields.items():
+        if not field_path:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Field path cannot be empty",
+            )
         parts = field_path.split(".")
         if len(parts) > MAX_FIELD_DEPTH:
             raise HTTPException(
@@ -715,6 +720,9 @@ async def delete_document(
             detail="Document not found",
         )
 
+    await db.delete(document)
+    await db.commit()  # DB first — authoritative
+
     for file in document.files:
         try:
             get_minio_client().remove_object(
@@ -723,6 +731,3 @@ async def delete_document(
             )
         except Exception as e:
             logger.warning("MinIO delete failed for %s: %s", file.minio_path, e)
-
-    await db.delete(document)
-    await db.commit()

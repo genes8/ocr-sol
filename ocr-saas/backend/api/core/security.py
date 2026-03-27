@@ -1,4 +1,4 @@
-"""Security utilities - JWT, password hashing, API keys."""
+"""Security utilities - JWT, passwords, API keys."""
 
 import hashlib
 import secrets
@@ -6,11 +6,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
+import bcrypt
 from collections.abc import Callable
 
 from fastapi import Depends, Header, HTTPException, status
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,18 +18,27 @@ from api.core.config import settings
 from api.core.database import get_db
 from api.models.db import APIKey, Tenant
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    """Verify a password against a bcrypt hash."""
+    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
 
 
-def get_password_hash(password: str) -> str:
-    """Hash a password."""
-    return pwd_context.hash(password)
+def hash_password(password: str) -> str:
+    """Hash a password with bcrypt."""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def generate_api_key() -> tuple[str, str, str]:
+    """Generate a new API key.
+
+    Returns:
+        Tuple of (full_key, key_prefix, key_hash)
+    """
+    full_key = f"ocr_{secrets.token_urlsafe(32)}"
+    key_prefix = full_key[:20]
+    key_hash = hashlib.sha256(full_key.encode()).hexdigest()
+    return full_key, key_prefix, key_hash
 
 
 def create_access_token(
@@ -81,27 +90,9 @@ def decode_token(token: str) -> dict[str, Any] | None:
         return None
 
 
-# API Key utilities
-def generate_api_key() -> tuple[str, str]:
-    """Generate a new API key and its hash.
-
-    Returns:
-        Tuple of (plain_key, hashed_key)
-    """
-    plain_key = f"ocr_{secrets.token_urlsafe(32)}"
-    key_hash = hashlib.sha256(plain_key.encode()).hexdigest()
-    key_prefix = plain_key[:12]
-    return plain_key, key_hash, key_prefix
-
-
 def hash_api_key(plain_key: str) -> str:
     """Hash an API key."""
     return hashlib.sha256(plain_key.encode()).hexdigest()
-
-
-def verify_api_key(plain_key: str, hashed_key: str) -> bool:
-    """Verify an API key against its hash."""
-    return hash_api_key(plain_key) == hashed_key
 
 
 async def _resolve_auth(

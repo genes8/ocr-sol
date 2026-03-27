@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, Edit2, Save, X } from "lucide-react";
+import { Check, Edit2, RefreshCw, Save, X } from "lucide-react";
 import type { BoundingBox } from "../services/api";
 
 interface FieldData {
@@ -15,6 +15,7 @@ interface FieldEditorProps {
   onFieldUpdate?: (key: string, value: unknown) => void;
   onFieldSelect?: (key: string, bbox?: BoundingBox) => void;
   selectedField?: string;
+  savingField?: string | null;
 }
 
 function getConfidenceColor(confidence: number): string {
@@ -40,11 +41,13 @@ function FieldRow({
   onUpdate,
   onSelect,
   isSelected,
+  isSaving,
 }: {
   field: FieldData;
   onUpdate: (key: string, value: unknown) => void;
   onSelect: (key: string, bbox?: BoundingBox) => void;
   isSelected: boolean;
+  isSaving: boolean;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState(formatValue(field.value));
@@ -103,15 +106,17 @@ function FieldRow({
             <>
               <button
                 onClick={handleSave}
-                className="p-1.5 text-green-600 hover:bg-green-50 rounded"
+                disabled={isSaving}
+                className="p-1.5 text-green-600 hover:bg-green-50 rounded disabled:opacity-50"
                 title="Save"
                 aria-label="Save field"
               >
-                <Save className="w-4 h-4" />
+                {isSaving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
               </button>
               <button
                 onClick={handleCancel}
-                className="p-1.5 text-gray-500 hover:bg-gray-100 rounded"
+                disabled={isSaving}
+                className="p-1.5 text-gray-500 hover:bg-gray-100 rounded disabled:opacity-50"
                 title="Cancel"
                 aria-label="Cancel"
               >
@@ -147,6 +152,7 @@ export function FieldEditor({
   onFieldUpdate,
   onFieldSelect,
   selectedField,
+  savingField,
 }: FieldEditorProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [filterConfidence, setFilterConfidence] = useState<number | null>(null);
@@ -220,6 +226,7 @@ export function FieldEditor({
                   onUpdate={onFieldUpdate || (() => {})}
                   onSelect={onFieldSelect || (() => {})}
                   isSelected={selectedField === field.key}
+                  isSaving={savingField === field.key}
                 />
               ))}
             </div>
@@ -240,6 +247,7 @@ export function FieldEditor({
                   onUpdate={onFieldUpdate || (() => {})}
                   onSelect={onFieldSelect || (() => {})}
                   isSelected={selectedField === field.key}
+                  isSaving={savingField === field.key}
                 />
               ))}
             </div>
@@ -260,6 +268,7 @@ export function FieldEditor({
                   onUpdate={onFieldUpdate || (() => {})}
                   onSelect={onFieldSelect || (() => {})}
                   isSelected={selectedField === field.key}
+                  isSaving={savingField === field.key}
                 />
               ))}
             </div>

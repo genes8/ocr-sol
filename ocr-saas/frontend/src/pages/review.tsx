@@ -31,6 +31,14 @@ function formatFieldKey(key: string): string {
     .replace(/^./, (str) => str.toUpperCase());
 }
 
+/**
+ * Recursively flattens a nested data object into a flat list of FieldData entries.
+ *
+ * - Keys are joined with dots to form full paths (e.g. `"address.city"`).
+ * - Arrays are treated as leaf values and are not recursed into.
+ * - Confidence is looked up by full dot-path key, defaulting to 0.5.
+ * - Bbox is looked up by full dot-path key first, then by the leaf key as fallback.
+ */
 function flattenFields(
   data: Record<string, unknown>,
   confidences: Record<string, number>,
@@ -69,6 +77,7 @@ export function Review() {
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [isActioning, setIsActioning] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [savingField, setSavingField] = useState<string | null>(null);
 
   // Fetch both "review" and "manual_review" documents for the queue.
   // "manual_review" includes unknown documents routed there by the classifier.
@@ -87,7 +96,9 @@ export function Review() {
     ? { ...reviewList, items: [...reviewList.items, ...manualList.items] }
     : reviewList ?? manualList;
 
-  const refetchList = () => { refetchReview(); refetchManual(); };
+  const refetchList = useCallback(() => {
+    void Promise.allSettled([refetchReview(), refetchManual()]);
+  }, [refetchReview, refetchManual]);
 
   // Fetch specific document
   const {
@@ -158,8 +169,15 @@ export function Review() {
 
   const handleFieldUpdate = useCallback(async (key: string, value: unknown) => {
     if (!id) return;
-    await documentsApi.updateFields(id, { [key]: value });
-    queryClient.invalidateQueries({ queryKey: ["document-result", id] });
+    setSavingField(key);
+    try {
+      await documentsApi.updateFields(id, { [key]: value });
+      queryClient.invalidateQueries({ queryKey: ["document-result", id] });
+    } catch {
+      toast.error("Failed to save field. Please try again.");
+    } finally {
+      setSavingField(null);
+    }
   }, [id, queryClient]);
 
   // Document list view
@@ -393,6 +411,7 @@ export function Review() {
               onFieldUpdate={handleFieldUpdate}
               onFieldSelect={handleFieldSelect}
               selectedField={selectedField}
+              savingField={savingField}
             />
           ) : (
             <div className="flex flex-col h-full overflow-hidden">

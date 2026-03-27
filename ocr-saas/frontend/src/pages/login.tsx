@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import type { AxiosError } from "axios";
 import { authApi } from "../services/api";
 import toast from "react-hot-toast";
 
@@ -30,7 +31,18 @@ export function Login() {
       }
       navigate("/");
     } catch (error) {
-      toast.error("Login failed. Please check your credentials.");
+      const status = (error as AxiosError).response?.status;
+      if (status === 401) {
+        toast.error("Invalid email or password.");
+      } else if (status === 409) {
+        toast.error("An account with this email already exists.");
+      } else if (status === 429) {
+        toast.error("Too many attempts. Please wait and try again.");
+      } else if (!status) {
+        toast.error("Network error. Check your connection.");
+      } else {
+        toast.error("Something went wrong. Please try again later.");
+      }
     } finally {
       setLoading(false);
     }

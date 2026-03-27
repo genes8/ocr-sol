@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 from pdf2image import convert_from_path
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from api.core.config import settings
@@ -21,6 +22,10 @@ from api.core.database import SyncSessionLocal
 from api.core.storage import get_minio_client, upload_thumbnail
 from api.models.db import AuditLog, Document, DocumentFile, DocumentStatus
 from workers.celery_app import celery_app
+
+_BLUR_THRESHOLD = 100.0
+_BRIGHTNESS_MIN = 30
+_BRIGHTNESS_MAX = 230
 
 
 def write_audit_event(
@@ -106,19 +111,25 @@ def create_document_file_record(
     width: int | None = None,
     height: int | None = None,
 ) -> None:
-    """Create DocumentFile record in database."""
+    """Create DocumentFile record in database (idempotent on retry)."""
     session = get_sync_session()
     try:
-        doc_file = DocumentFile(
-            id=uuid.uuid4(),
-            document_id=uuid.UUID(document_id),
-            file_type=file_type,
-            page_number=page_number,
-            minio_path=minio_path,
-            width=width,
-            height=height,
+        stmt = (
+            pg_insert(DocumentFile)
+            .values(
+                id=uuid.uuid4(),
+                document_id=uuid.UUID(document_id),
+                file_type=file_type,
+                page_number=page_number,
+                minio_path=minio_path,
+                width=width,
+                height=height,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["document_id", "page_number", "file_type"]
+            )
         )
-        session.add(doc_file)
+        session.execute(stmt)
         session.commit()
     finally:
         session.close()
@@ -164,22 +175,8 @@ def pdf_to_images(pdf_bytes: bytes, dpi: int = 200) -> list[Image.Image]:
         logger.info(f"Converted {len(images)} pages from PDF at {dpi} DPI")
         
     except Exception as e:
-        logger.error(f"Failed to convert PDF using pdf2image: {e}")
-        # Fallback: try using pypdf as last resort
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        
-        for page_num, page in enumerate(reader.pages, 1):
-            # Get page dimensions
-            page_width = int(page.mediabox.width or 612)
-            page_height = int(page.mediabox.height or 792)
-            
-            # Create a white image as fallback
-            # This is better than nothing for processing continuation
-            img = Image.new("RGB", (page_width, page_height), color="white")
-            images.append(img)
-            
-        logger.warning(f"Using fallback blank images for PDF (pypdf fallback)")
+        logger.error(f"PDF conversion failed, aborting preprocessing: {e}")
+        raise
     
     finally:
         # Clean up temp file
@@ -275,14 +272,9 @@ def check_image_quality(image: Image.Image) -> dict[str, Any]:
     # Calculate average brightness
     brightness = np.mean(img_array)
     
-    # Quality thresholds
-    BLUR_THRESHOLD = 100.0
-    BRIGHTNESS_MIN = 30
-    BRIGHTNESS_MAX = 230
-    
     is_acceptable = (
-        blur_score >= BLUR_THRESHOLD and
-        BRIGHTNESS_MIN <= brightness <= BRIGHTNESS_MAX
+        blur_score >= _BLUR_THRESHOLD and
+        _BRIGHTNESS_MIN <= brightness <= _BRIGHTNESS_MAX
     )
     
     return {
@@ -297,11 +289,11 @@ def _get_quality_warnings(blur_score: float, brightness: float) -> list[str]:
     """Generate warnings based on quality metrics."""
     warnings = []
     
-    if blur_score < 100:
+    if blur_score < _BLUR_THRESHOLD:
         warnings.append("Image may be blurry")
-    if brightness < 30:
+    if brightness < _BRIGHTNESS_MIN:
         warnings.append("Image is too dark")
-    elif brightness > 230:
+    elif brightness > _BRIGHTNESS_MAX:
         warnings.append("Image is too bright")
     
     return warnings

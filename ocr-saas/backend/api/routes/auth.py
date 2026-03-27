@@ -1,13 +1,10 @@
 """Authentication and authorization API routes."""
 
-import hashlib
-import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-import bcrypt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +15,10 @@ from api.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    generate_api_key,
     get_current_tenant,
+    hash_password,
+    verify_password,
 )
 from api.models.db import APIKey, Tenant
 from api.routes.schemas import (
@@ -58,28 +58,6 @@ async def check_auth_rate_limit(request: Request) -> None:
     except Exception:
         # Redis unavailable — fail open (don't block legitimate users)
         pass
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against a hash."""
-    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
-
-
-def hash_password(password: str) -> str:
-    """Hash a password."""
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-
-def generate_api_key() -> tuple[str, str, str]:
-    """Generate a new API key.
-    
-    Returns:
-        Tuple of (full_key, key_prefix, key_hash)
-    """
-    full_key = f"ocr_{secrets.token_urlsafe(32)}"
-    key_prefix = full_key[:20]
-    key_hash = hashlib.sha256(full_key.encode()).hexdigest()
-    return full_key, key_prefix, key_hash
 
 
 @router.post("/register", response_model=TenantResponse, status_code=status.HTTP_201_CREATED)

@@ -112,12 +112,12 @@ async def deliver_webhook(
             delivery.response_body = response.text[:1000] if response.text else None
             delivery.delivered_at = datetime.now(timezone.utc)
 
-        except httpx.TimeoutException as e:
-            delivery.error_message = f"Timeout: {str(e)}"
+        except httpx.TimeoutException:
+            delivery.error_message = "TIMEOUT"
             delivery.attempts += 1
 
-        except httpx.RequestError as e:
-            delivery.error_message = f"Request error: {str(e)}"
+        except httpx.RequestError:
+            delivery.error_message = "CONNECTION_ERROR"
             delivery.attempts += 1
 
         await db.commit()

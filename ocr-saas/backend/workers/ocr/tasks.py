@@ -98,7 +98,11 @@ def get_processed_pages(
                 # Extract page number from filename
                 filename = obj.object_name.split("/")[-1]
                 if filename.startswith("p") and "_processed" in filename:
-                    page_num = int(filename.split("_")[0][1:])
+                    try:
+                        page_num = int(filename.split("_")[0][1:])
+                    except (IndexError, ValueError):
+                        logger.warning("Skipping file with unexpected name: %s", filename)
+                        continue
 
                     # Get the image
                     result = client.get_object(bucket, obj.object_name)
@@ -476,10 +480,18 @@ def process_ocr(
 
     except Exception as exc:
         logger.exception(f"OCR failed for document {document_id}")
+        if isinstance(exc, requests.exceptions.Timeout):
+            msg = "OCR service timeout"
+        elif isinstance(exc, requests.exceptions.ConnectionError):
+            msg = "OCR service unavailable"
+        elif isinstance(exc, (json.JSONDecodeError, KeyError)):
+            msg = "OCR response parse error"
+        else:
+            msg = "OCR processing failed"
         update_document_status(
             document_id,
             DocumentStatus.OCR_FAILED,
-            error_message=str(exc),
+            error_message=msg,
         )
 
         raise self.retry(exc=exc, countdown=60, max_retries=3)

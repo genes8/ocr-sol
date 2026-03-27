@@ -192,6 +192,7 @@ class DocumentFile(Base):
     __tablename__ = "document_files"
     __table_args__ = (
         Index("idx_document_files_doc", "document_id"),
+        UniqueConstraint("document_id", "page_number", "file_type", name="uq_document_files_doc_page_type"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
