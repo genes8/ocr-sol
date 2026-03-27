@@ -77,6 +77,21 @@ class CacheService:
         """Set expiration on key."""
         await self.client.expire(key, seconds)
 
+    async def check_rate_limit(self, key: str, limit: int, window_seconds: int) -> int:
+        """Atomically increment a rate-limit counter and set its TTL.
+
+        Uses a pipeline so that incr and expire are sent in a single round-trip
+        and the TTL is always set — even if the process crashes between the two ops.
+
+        Returns:
+            The new counter value after increment.
+        """
+        pipe = self.client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window_seconds)
+        results = await pipe.execute()
+        return results[0]
+
 
 async def get_cache() -> CacheService:
     """Get cache service instance."""

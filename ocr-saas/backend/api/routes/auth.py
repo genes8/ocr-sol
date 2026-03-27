@@ -6,13 +6,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 import bcrypt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
 from api.core.database import get_db
+from api.core.redis import get_cache
 from api.core.security import (
     create_access_token,
     create_refresh_token,
@@ -33,6 +34,30 @@ from api.routes.schemas import (
 )
 
 router = APIRouter()
+
+# Auth rate limit: 10 attempts per IP per 60 seconds
+_AUTH_RATE_LIMIT = 10
+_AUTH_RATE_WINDOW = 60  # seconds
+
+
+async def check_auth_rate_limit(request: Request) -> None:
+    """Reject requests exceeding the auth rate limit for a given IP."""
+    ip = request.client.host if request.client else "unknown"
+    key = f"rate_limit:auth:{ip}"
+    try:
+        cache = await get_cache()
+        count: int = await cache.check_rate_limit(key, _AUTH_RATE_LIMIT, _AUTH_RATE_WINDOW)
+        if count > _AUTH_RATE_LIMIT:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many authentication attempts. Please try again later.",
+                headers={"Retry-After": str(_AUTH_RATE_WINDOW)},
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        # Redis unavailable — fail open (don't block legitimate users)
+        pass
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -61,6 +86,7 @@ def generate_api_key() -> tuple[str, str, str]:
 async def register_tenant(
     data: TenantCreate,
     db: AsyncSession = Depends(get_db),
+    _rate: None = Depends(check_auth_rate_limit),
 ) -> TenantResponse:
     """Register a new tenant."""
     existing = await db.execute(
@@ -99,6 +125,7 @@ async def register_tenant(
 async def login(
     data: LoginRequest,
     db: AsyncSession = Depends(get_db),
+    _rate: None = Depends(check_auth_rate_limit),
 ) -> Token:
     """Authenticate a tenant and return tokens."""
     result = await db.execute(

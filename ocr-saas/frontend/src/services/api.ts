@@ -20,6 +20,12 @@ api.interceptors.request.use(
     const token = localStorage.getItem("access_token");
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
+    } else if (!token && !config.url?.startsWith("/auth/")) {
+      // No token for a protected route — cancel request to prevent 401 noise
+      if (!window.location.pathname.includes("/login")) {
+        window.location.href = "/login";
+      }
+      return Promise.reject(new Error("No authentication token"));
     }
     return config;
   },
@@ -241,6 +247,15 @@ export const documentsApi = {
   },
 };
 
+export interface TenantProfile {
+  id: string;
+  name: string;
+  slug: string;
+  email: string;
+  is_active: boolean;
+  created_at: string;
+}
+
 export const authApi = {
   login: async (email: string, password: string) => {
     const response = await api.post("/auth/login", { email, password });
@@ -256,12 +271,18 @@ export const authApi = {
     const response = await api.post("/auth/refresh", { refresh_token: refreshToken });
     return response.data;
   },
+
+  me: async (): Promise<TenantProfile> => {
+    const response = await api.get("/auth/me");
+    return response.data;
+  },
 };
 
 export const webhooksApi = {
-  list: async () => {
+  list: async (): Promise<{ id: string; name: string; url: string; events?: string[] }[]> => {
     const response = await api.get("/webhooks");
-    return response.data;
+    // Backend returns a paginated { items, total } shape
+    return Array.isArray(response.data) ? response.data : (response.data?.items ?? []);
   },
 
   create: async (data: {
