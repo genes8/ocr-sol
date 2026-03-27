@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { documentsApi } from "../services/api";
 
 export function Dashboard() {
-  const { data } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: ["stats"],
     queryFn: async () => {
       const [all, review] = await Promise.all([
@@ -52,9 +52,13 @@ export function Dashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-gray-500">{stat.label}</p>
-                <p className="text-3xl font-bold text-gray-900 mt-1">
-                  {stat.value}
-                </p>
+                {isLoading ? (
+                  <div className="h-8 w-16 bg-gray-200 animate-pulse rounded mt-1" />
+                ) : (
+                  <p className="text-3xl font-bold text-gray-900 mt-1">
+                    {stat.value}
+                  </p>
+                )}
               </div>
               <div className={`${stat.color} p-3 rounded-lg`}>
                 <stat.icon className="w-6 h-6 text-white" />

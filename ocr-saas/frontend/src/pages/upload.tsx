@@ -8,6 +8,7 @@ export function Upload() {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -18,13 +19,16 @@ export function Upload() {
   const handleUpload = async () => {
     if (!file) return;
     setUploading(true);
+    setUploadError(null);
 
     try {
       const doc = await documentsApi.upload(file);
       toast.success("Document uploaded successfully!");
       navigate(`/documents/${doc.id}`);
-    } catch {
-      toast.error("Upload failed. Please try again.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Upload failed. Please try again.";
+      setUploadError(msg);
+      toast.error(msg);
     } finally {
       setUploading(false);
     }
@@ -77,6 +81,9 @@ export function Upload() {
             {uploading ? "Uploading..." : "Upload & Process"}
           </button>
         </div>
+      )}
+      {uploadError && (
+        <p className="mt-2 text-sm text-red-600">{uploadError}</p>
       )}
     </div>
   );
